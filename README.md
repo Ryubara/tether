@@ -1,12 +1,33 @@
 # Tether
 
-A Claude Code plugin that keeps a session tied to its project's state, and nothing more:
+A Claude Code plugin that keeps long sessions cheap: it clears the context by itself at safe points and picks the
+work up again from a single state file, so you can leave a session running unattended.
+
+## Why: the automatic clear
+
+Every request a session makes carries the whole conversation so far, so a long session costs more tokens, and gets
+slower, with every turn. Claude Code's autocompact steps in only when the context is nearly full, and it replaces
+your work with a summary it writes itself.
+
+Tether resets the context on purpose, well before that:
+
+1. A **context meter** in the Stop hook watches the session's size and, past a threshold (200000 tokens by default),
+   asks for a checkpoint.
+2. The `tether:checkpoint` skill has Claude write down exactly where it is and what to do next in `HANDOFF.md`.
+3. Tether then **types `/clear` and `Continue from HANDOFF.md.` into the session itself**, so the session carries on
+   from a small, fresh context with nobody at the keyboard.
+
+A cleared session starts at the size of a fresh one (about 45000 tokens with a short `HANDOFF.md`) instead of the
+full history, so the tokens spent per turn drop back down after every checkpoint, and what matters survives in
+`HANDOFF.md`, written deliberately rather than summarised.
+
+The automatic clear works on Windows today. On macOS and Linux, Tether saves the checkpoint the same way and asks
+you to type `/clear`; doing it automatically there is planned.
+
+## What else it does
 
 - **Handoff.** `HANDOFF.md` at the project root is the session's memory. Tether puts it into the context at every
   session start (`startup`, `resume`, `clear`, `compact`), so a cleared session picks up where the last one stopped.
-- **Checkpoint and automatic clear.** A context meter in the Stop hook says when to checkpoint; the
-  `tether:checkpoint` skill saves the state to `HANDOFF.md` and asks for a clear; the hook then types `/clear` and
-  `Continue from HANDOFF.md.` into the session (Windows), so long unattended work never hits autocompact.
 - **Squash.** `scripts/squash.py` turns a working branch's many commits into a few feature-sized ones, with a
   byte-identical tree and the old tip tagged.
 - **Setup.** `tether:setup` creates `HANDOFF.md` and a short project-rules skeleton in `AGENTS.md`.
@@ -26,7 +47,7 @@ claude plugin marketplace add Ryubara/tether
 claude plugin install tether@tether
 ```
 
-Pin a release with `claude plugin marketplace add Ryubara/tether@v0.1.0`. To share it with everyone working on a
+Pin a release with `claude plugin marketplace add Ryubara/tether@v0.1.1`. To share it with everyone working on a
 project, add it to the project's `.claude/settings.json` instead:
 
 ```json
