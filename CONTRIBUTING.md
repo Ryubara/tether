@@ -43,8 +43,8 @@ is checked by hand:
    session started from inside another Claude Code session (that one saves no transcript, so the meter never
    fires). Set `TETHER_STATE_DIR` to a scratch folder so the meter's files and the injector's log are easy to find.
 3. Ask the session for the codeword: it must answer from `HANDOFF.md` without reading the file.
-4. Lower the meter for the test (`TETHER_CHECKPOINT_AT`, well above a fresh session's context of about 45000
-   tokens, or every cleared session checkpoints again), read a few files to pass it, and let the session run
+4. Lower the meter for the test (`TETHER_CHECKPOINT_AT`, well above a fresh session's context, which depends
+   on your setup, or every cleared session checkpoints again), read a few files to pass it, and let the session run
    `tether:checkpoint`.
 5. Expect, on Windows: `/clear`, a new session id, and `Continue from HANDOFF.md.` answered from the Resume section;
    the injector's log (`inject-<key>.log` in the state folder) shows each step. Elsewhere, or with

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "tether",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Keeps a Claude Code session tied to its project state: HANDOFF.md across /clear, unattended checkpoints, and squashing a working branch into clean commits",
   "author": { "name": "Ryubara", "url": "https://github.com/Ryubara" },
   "homepage": "https://github.com/Ryubara/tether",
