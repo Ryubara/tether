@@ -5,6 +5,12 @@ and Tether uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### Changed
+
+- The README leads with the automatic clear: why it saves tokens, how it works, and where it runs today.
+
 ## [0.1.0]
 
 The first public release.
@@ -19,5 +25,6 @@ The first public release.
 - `lib/run.sh`, which runs the hooks and scripts with Python 3.10+ on Windows, macOS and Linux.
 - Install from this repository, which is its own plugin marketplace.
 
-[Unreleased]: https://github.com/Ryubara/tether/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Ryubara/tether/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Ryubara/tether/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Ryubara/tether/releases/tag/v0.1.0
