@@ -1,0 +1,13 @@
+# Development tooling only: Tether itself has no dependencies and is not a Python package.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tether", "inject_clear", "session_start", "stop", "squash", "conftest"]

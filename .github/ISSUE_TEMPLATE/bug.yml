@@ -1,0 +1,32 @@
+name: Bug report
+description: Something in Tether does not work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead. Include hook output or the injector log (`inject-<key>.log` in the state directory) if relevant.
+    validations:
+      required: true
+  - type: input
+    id: tether
+    attributes:
+      label: Tether version
+      placeholder: 0.1.0 (from .claude-plugin/plugin.json) or a commit
+    validations:
+      required: true
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version and install
+      placeholder: "2.x.y, native installer / npm"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and terminal
+      placeholder: Windows 11 + Windows Terminal, macOS 15 + iTerm2, ...
+    validations:
+      required: true

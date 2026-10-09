@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "tether",
+  "owner": { "name": "Ryubara", "url": "https://github.com/Ryubara" },
+  "description": "Tether, installed straight from its own repository",
+  "plugins": [
+    {
+      "name": "tether",
+      "source": "./",
+      "description": "HANDOFF.md across /clear, unattended checkpoints, and branch squashing"
+    }
+  ]
+}

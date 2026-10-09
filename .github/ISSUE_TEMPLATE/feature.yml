@@ -1,0 +1,17 @@
+name: Idea
+description: Suggest a change. Tether stays small, so say what problem it solves.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What gets in your way today, without Tether's help or because of it.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+    validations:
+      required: false
