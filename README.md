@@ -17,9 +17,15 @@ Tether resets the context on purpose, well before that:
 3. Tether then **types `/clear` and `Continue from HANDOFF.md.` into the session itself**, so the session carries on
    from a small, fresh context with nobody at the keyboard.
 
-A cleared session starts at the size of a fresh one (about 45000 tokens with a short `HANDOFF.md`) instead of the
-full history, so the tokens spent per turn drop back down after every checkpoint, and what matters survives in
-`HANDOFF.md`, written deliberately rather than summarised.
+What a clear gives you:
+
+- **Fewer tokens per turn.** The context goes back to a fresh session's size after every checkpoint, instead of
+  growing for as long as the session runs.
+- **Faster turns.** Smaller requests come back sooner.
+- **Nothing lost to a summary.** What the next session needs is written down on purpose in `HANDOFF.md`, not
+  condensed by autocompact at the last moment.
+- **Focus.** The model works from the current state and next step, not from hours of old tool output.
+- **Unattended runs.** Long tasks keep going through many clears without anyone at the keyboard.
 
 The automatic clear works on Windows today. On macOS and Linux, Tether saves the checkpoint the same way and asks
 you to type `/clear`; doing it automatically there is planned.
@@ -47,7 +53,7 @@ claude plugin marketplace add Ryubara/tether
 claude plugin install tether@tether
 ```
 
-Pin a release with `claude plugin marketplace add Ryubara/tether@v0.1.1`. To share it with everyone working on a
+Pin a release with `claude plugin marketplace add Ryubara/tether@v0.1.2`. To share it with everyone working on a
 project, add it to the project's `.claude/settings.json` instead:
 
 ```json
@@ -122,9 +128,9 @@ The suite sets `TETHER_AUTOCLEAR=0` and its own state dir, so it never types int
   and reports the failure.
 - The meter can read one call behind: the Stop hook fires before the turn's final message is on disk, so the size
   is the previous API call's. Harmless at a 25000-token step.
-- `TETHER_CHECKPOINT_AT` must sit well above a fresh session's context (about 42000-48000 tokens with a small
-  HANDOFF.md). Below it, every cleared session is asked to checkpoint again: seen live at 40000, a loop of eight
-  clears until the model declined.
+- `TETHER_CHECKPOINT_AT` must sit well above a fresh session's context, which depends on your setup (the skills,
+  MCP servers and plugins loaded at start, plus `HANDOFF.md`). Below it, every cleared session is asked to
+  checkpoint again, in a loop.
 - `/clear` kills the shell command a background agent is running at that moment (exit 137, seen twice live); the
   agent survives, and its completion notice reaches the cleared session. The checkpoint skill therefore prefers a
   moment with no agent running.
