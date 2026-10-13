@@ -19,6 +19,13 @@
   model's rates and leave the agent there. Tether pings only an agent whose `.meta.json` pins a model or whose last
   request was on the session's model (`$.session.model()`); any other, or one whose model is unknown, gets the
   handover. The Stop hook's reason says the same for a manual ping.
+- Changed: a model is compared by its normalised name (no `claude-` prefix, date or `[1m]`); a bare family alias such
+  as `opus` matches only itself, never a full id, so an agent on an older opus is handed over, not pinged. A
+  `.meta.json` that says `"model": "inherit"` does not pin the agent.
+- Fixed: the wake the `killed` notification causes after the stops is not a late handover (no `handover-late` alert
+  once the tasks were stopped); the `prs` poller writes the guard store under the same lock as the other writers; a
+  store call that never answers times out after 30 s instead of blocking every later writer; a stuck tick is taken
+  over by the engine clock, and the stuck tick finishing late no longer clears the flag of the tick that replaced it.
 - Added: a handed-over agent is retired only when it is quiet. After the leftover tasks are stopped Tether waits for
   the agent to settle; one that is still `waiting` (a Monitor or a background Agent Tether cannot identify) is
   alerted and not recorded `retired`. Before the stops it looks at the agent's status once more.

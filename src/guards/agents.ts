@@ -81,14 +81,14 @@ function normModel(m: string): string {
     .replace(/\./g, '-')
 }
 
-/** Whether two model names mean the same model: equal once normalised, or one is only a family alias (`opus`) of the other. */
+/**
+ * Whether two model names mean the same model: equal once normalised. A bare family alias (`opus`) names no version, so
+ * it matches only the same alias: against `claude-opus-5-5` it could be an older opus, and a wake that switched the
+ * model would write a new cache. Unknown counts as different, which fails toward the handover.
+ */
 export function sameModel(a: string | undefined, b: string | undefined): boolean {
   if (!a || !b) return false
-  const x = normModel(a)
-  const y = normModel(b)
-  if (x === y) return true
-  const alias = (s: string) => /^[a-z]+$/.test(s)
-  return (alias(x) && y.startsWith(x + '-')) || (alias(y) && x.startsWith(y + '-'))
+  return normModel(a) === normModel(b)
 }
 
 /**
@@ -232,7 +232,8 @@ export function planActions(agents: StoppedCandidate[], store: GuardStore, rules
       const since = act.handoverAt
       const stopped = a.status !== 'running' && a.finishedAt !== undefined && a.finishedAt >= since && a.lastStepAt > since
       if (!stopped) {
-        if (now - since >= wait * MIN && !alerted(act, 'handover-late', since)) {
+        // After the stops the agent is woken once by the killed notification (expected): that is not a late handover
+        if (act.tasksStoppedAt === undefined && now - since >= wait * MIN && !alerted(act, 'handover-late', since)) {
           out.push({ kind: 'alert', id: a.id, label: a.label, key: 'handover-late', since, text: `${a.label} (${a.id}) has not finished its handover ${wait} min after Tether asked; it is NOT stopped. Its cache expires in ~${left} min.` })
         }
         continue

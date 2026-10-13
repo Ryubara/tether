@@ -211,7 +211,9 @@ test('an agent whose Agent call pinned no model, on another model than the sessi
   ]
   expect(run(agents, 'claude-opus-5-5')).toEqual(['warm:same', 'handover:other:model', 'warm:pinned', 'handover:unknown:model'])
   // An alias or a suffix of the same model is the same model; without the session's model only a pinned agent is safe
-  expect(run([model('same', { model: 'claude-opus-5-5' })], 'opus[1m]')).toEqual(['warm:same'])
+  expect(run([model('same', { model: 'claude-opus-5-5' })], 'claude-opus-5-5[1m]')).toEqual(['warm:same'])
+  // ... but a bare alias for the session against a full id is not proof (the agent may be on an older opus)
+  expect(run([model('same', { model: 'claude-opus-5-5' })], 'opus[1m]')).toEqual(['handover:same:model'])
   expect(run(agents, undefined)).toEqual(['handover:same:model', 'handover:other:model', 'warm:pinned', 'handover:unknown:model'])
   // A big context is a handover whatever the model
   expect(run([model('big', { model: 'claude-opus-5-5', contextTokens: 300_000 })], 'claude-opus-5-5')).toEqual(['handover:big:size'])
@@ -219,8 +221,13 @@ test('an agent whose Agent call pinned no model, on another model than the sessi
 
 test('sameModel compares names the way the engine spells them', async () => {
   expect(sameModel('claude-opus-5-5', 'claude-opus-5-5')).toBe(true)
-  expect(sameModel('claude-opus-5-5', 'opus')).toBe(true)
-  expect(sameModel('claude-opus-5-5', 'opus[1m]')).toBe(true)
+  expect(sameModel('opus', 'opus[1m]')).toBe(true)
+  expect(sameModel('opus', 'opus')).toBe(true)
+  expect(sameModel('claude-opus-5-5', 'claude-opus-5-5[1m]')).toBe(true)
+  // A bare alias names no version: against a full id it could be an older model, so it fails toward the handover
+  expect(sameModel('claude-opus-5-5', 'opus')).toBe(false)
+  expect(sameModel('opus', 'claude-opus-4-1')).toBe(false)
+  expect(sameModel('opus', 'sonnet')).toBe(false)
   expect(sameModel('claude-opus-5-5-20261001', 'claude-opus-5-5')).toBe(true)
   expect(sameModel('claude-sonnet-5-5', 'claude-opus-5-5')).toBe(false)
   expect(sameModel('claude-opus-4-1', 'claude-opus-5-5')).toBe(false)
@@ -228,6 +235,17 @@ test('sameModel compares names the way the engine spells them', async () => {
   expect(sameModel(undefined, 'opus')).toBe(false)
   expect(wakeKeepsModel({ model: 'claude-haiku-5-5', pinned: true }, 'opus')).toBe(true)
   expect(wakeKeepsModel({}, 'opus')).toBe(false)
+})
+
+test('a handed-over agent whose tasks were stopped is not called late when the killed notification wakes it', async () => {
+  const stoppedAt = NOW - 3 * MIN
+  const store = recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 30 * MIN, tasksStoppedAt: stoppedAt, stoppedCount: 1 })
+  // Woken by the notification: running again, long after the handover was asked
+  const woken = waiting('big', 41, 300_000, { status: 'running', lastStepAt: NOW - 20_000 })
+  expect(planActions([woken], store, RULES_30, AUTO, NOW)).toEqual([])
+  // Without the stops the same agent is late
+  const asked = recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 30 * MIN })
+  expect(planActions([woken], asked, RULES_30, AUTO, NOW)).toMatchObject([{ kind: 'alert', key: 'handover-late' }])
 })
 
 test('the handover wait is cut to half the lead so the alert comes before the cache expires', async () => {

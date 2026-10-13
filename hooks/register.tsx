@@ -989,14 +989,15 @@ const guardNotes: string[] = []
 const guardErrors = new Map<string, string>()
 /** Alerts already told (agent, kind and cycle), so one that could not be saved is not told every tick. */
 const toldAlerts = new Set<string>()
-/** Serialises the guard store's read-modify-write cycles (the tick, the decision tool, the Stop hook). */
+/** Serialises the guard store's read-modify-write cycles (the tick, the decision and owner tools, the prs poller). */
 let storeChain: Promise<unknown> = Promise.resolve()
 
 /** Changes the guard store under a lock, so two writers cannot overwrite each other's change. */
 function updateGuardStore($: any, change: (s: GuardStore) => GuardStore): Promise<GuardStore> {
+  // A hung $.store call times out, so it cannot block every later writer
   const run = storeChain.then(async () => {
-    const next = change(await guardStore($))
-    await saveGuardStore($, next)
+    const next = change(await withTimeout($, guardStore($), ACTION_TIMEOUT_MS, 'store.get'))
+    await withTimeout($, saveGuardStore($, next), ACTION_TIMEOUT_MS, 'store.set')
     return next
   })
   storeChain = run.catch(() => undefined)
@@ -1248,7 +1249,7 @@ async function refreshUndecided($: any): Promise<Undecided[]> {
  * ping that is due; one failing plan does not stop the others.
  */
 async function guardTick($: any): Promise<void> {
-  const started = Date.now()
+  const started = await $.clock.now()
   if (!cfg.enabled || (guardTicking && started - guardTickStart < GUARD_TICK_MAX_MS)) return
   guardTicking = true
   guardTickStart = started
@@ -1275,7 +1276,8 @@ async function guardTick($: any): Promise<void> {
   } catch (err) {
     failedOnce($, '*', `the tick failed: ${err}`)
   } finally {
-    guardTicking = false
+    // A zombie tick (stuck past the limit, since taken over) must not clear the flag of the tick that owns it now
+    if (guardTickStart === started) guardTicking = false
   }
 }
 
@@ -1321,11 +1323,14 @@ async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]
     if (p.worktrees) found = [...found, ...(await unpushedIn($, p, heads))]
     lastProblems = found
     // A rerun the command says it made (or would make) owns that PR's failed checks for `rerunHours`.
-    const store = await guardStore($)
-    let recorded = store
-    for (const x of reruns) if (ACTIVE_RERUN.has(x.status)) recorded = recordRerun(recorded, x.number, heads.get(x.number)?.sha ?? '?', x.checks, p.rerunHours, now)
-    const pruned = pruneOwners(recorded, now)
-    if (pruned !== store) await saveGuardStore($, pruned)
+    const apply = (s: GuardStore): GuardStore => {
+      let recorded = s
+      for (const x of reruns) if (ACTIVE_RERUN.has(x.status)) recorded = recordRerun(recorded, x.number, heads.get(x.number)?.sha ?? '?', x.checks, p.rerunHours, now)
+      return pruneOwners(recorded, now)
+    }
+    // Written under the lock, and only when something changed, so it cannot overwrite a concurrent decision
+    const before = await guardStore($)
+    const pruned = apply(before) !== before ? await updateGuardStore($, apply) : before
     return { findings: toldProblems(found, pruned, now).map(x => ({ key: problemKey(x), text: problemLine(x) })) }
   } catch (err) {
     return { error: String(err) }

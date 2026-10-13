@@ -32,7 +32,7 @@ type World = {
   /** The content of agent a1's .meta.json, when it has one. */
   meta?: string
   /** session.send / TaskStop never answer (a blocked permission dialog). */
-  hang: { send?: boolean; taskStop?: boolean }
+  hang: { send?: boolean; taskStop?: boolean; /** Every store.set never answers (while true). */ storeSet?: boolean; /** Every store.get never answers (while true). */ storeGet?: boolean }
 }
 
 const world = (over: Partial<World> = {}): World => ({
@@ -62,7 +62,17 @@ const ended = (id: string, status = 'completed') =>
 /** Starts Tether with `config` as the project file and the fake world's answers. */
 async function start($: any, on: any, config: unknown, w: World) {
   const clock = mock.clock(on)
-  mock.store(on)
+  // The in-memory store, with calls that can hang
+  const kept = new Map<string, unknown>()
+  on('store.get', async ($: any, e: any) => {
+    if (w.hang.storeGet) await clock.sleep(24 * 60 * MIN)
+    return { value: kept.get(e.key) }
+  })
+  on('store.set', async ($: any, e: any) => {
+    if (w.hang.storeSet) await clock.sleep(24 * 60 * MIN)
+    kept.set(e.key, e.value)
+    return { value: undefined }
+  })
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', () => ({ value: undefined }))
   on('tool.register', () => ({ value: { tool: 'x' } }))
@@ -342,6 +352,55 @@ test('the same agent with a pinned model (its .meta.json names one) keeps it whe
   await clock.advance(41 * MIN)
   expect(w.sent.length).toBe(1)
   expect(w.sent[0]!.text).toContain('keep waiting, no action needed')
+})
+
+test('a meta file that says inherit does not pin the model: an agent on another model is handed over', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), meta: '{"agentType":"implementer","model":"inherit"}' })
+  const clock = await start($, on, CFG, w)
+  await step($, 'a1', 'claude-sonnet-5-5')
+  await clock.advance(41 * MIN)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+})
+
+test('a session model spelled as a bare alias proves nothing about an agent on a full id: handed over, not pinged', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), sessionModel: 'opus' })
+  const clock = await start($, on, CFG, w)
+  await step($, 'a1', 'claude-opus-4-1')
+  await clock.advance(41 * MIN)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+})
+
+test('a store write nobody answers does not stop a later decision from being recorded', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1') })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await clock.advance(38 * MIN)
+  w.hang.storeSet = true
+  await clock.advance(3 * MIN)
+  // The ping went out; recording it hung and gave up after 30 s (so the ping is retried)
+  expect(w.sent.length).toBeGreaterThanOrEqual(1)
+  await clock.advance(1 * MIN)
+  w.hang.storeSet = false
+  const r: any = await decide($, 'kept-warm')
+  expect(String(r.result ?? r.text ?? '')).toContain('a1 recorded as kept-warm')
+})
+
+test('a tick stuck on a hung store read is taken over after five minutes by the engine clock', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1') })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await clock.advance(38 * MIN)
+  // The tick that starts at minute 39 hangs on its first store read; later reads answer
+  w.hang.storeGet = true
+  await clock.advance(1 * MIN)
+  w.hang.storeGet = false
+  // The agent is due from minute 40, but the tick that started at 39 holds the guard
+  await clock.advance(3 * MIN)
+  expect(w.sent).toEqual([])
+  await clock.advance(4 * MIN)
+  expect(w.sent.length).toBe(1)
 })
 
 test('a handed-over agent that still waits on work Tether cannot see is not retired: the model is told and the Stop hook blocks', { timeoutMs: 30_000 }, async ($, on) => {

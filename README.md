@@ -75,7 +75,9 @@ run inside Claude Code (version 2.1.287 or later). See the
     at the session model's rates and leave the agent on the dearer model. `$.session.send` takes only `to` and
     `text`: it cannot name a model. So Tether pings only an agent whose `.meta.json` pins a model or whose last
     request (`turn.step`, else its transcript when under 4 MB) was on the session's model (`$.session.model()`,
-    compared as `claude-opus-5-5` = `opus` = `opus[1m]`). An agent on another model, or whose model Tether cannot
+    compared as `claude-opus-5-5` = `claude-opus-5-5[1m]`; a bare alias such as `opus` matches only itself, because it
+    could be an older opus, so it never proves a full id is the same model; `"model": "inherit"` in the meta file is
+    not a pin). An agent on another model, or whose model Tether cannot
     tell, is handed over instead, whatever its size; that one wake writes one cache on the session's model, once.
   - **Hand over.** A stopped agent with background work and at least `handoverTokens` is sent the handover request
     (commit, update `STATUS.md`, list the running background jobs and their result files, say the next exact

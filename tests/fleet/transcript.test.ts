@@ -142,4 +142,8 @@ test('the model of the last request and the model an Agent call pinned are read 
   expect(metaModel('{"agentType":"implementer","model":"sonnet","effort":"high"}')).toBe('sonnet')
   expect(metaModel('{"agentType":"general-purpose"}')).toBeUndefined()
   expect(metaModel('not json')).toBeUndefined()
+  // An agent that inherits the session's model is not pinned
+  expect(metaModel('{"agentType":"implementer","model":"inherit"}')).toBeUndefined()
+  expect(metaModel('{"model":" Inherit "}')).toBeUndefined()
+  expect(metaModel('{"model":""}')).toBeUndefined()
 })

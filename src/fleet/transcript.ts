@@ -53,13 +53,14 @@ export function metaDescription(text: string): string | undefined {
 /**
  * The model the Agent call pinned for a subagent, from its `.meta.json` (`"model":"sonnet"`), if it has one. A
  * subagent with one keeps that model when a message wakes it; one without (it ran on a default) is woken on the
- * parent session's model. Measured on 2.1.296 transcripts: 55 of 55 wakes of pinned agents kept their model, 12 of 12
+ * parent session's model (`inherit` is not a pin). Measured on 2.1.296 transcripts: 55 of 55 wakes of pinned agents kept their model, 12 of 12
  * wakes of unpinned sonnet or haiku agents ran on the parent's opus.
  */
 export function metaModel(text: string): string | undefined {
   try {
     const m = (JSON.parse(text) as { model?: unknown }).model
-    return typeof m === 'string' && m.trim() !== '' ? m.trim() : undefined
+    // `inherit` is the Agent call's default: the agent follows the session, so nothing is pinned
+    return typeof m === 'string' && m.trim() !== '' && m.trim().toLowerCase() !== 'inherit' ? m.trim() : undefined
   } catch {
     return undefined
   }
