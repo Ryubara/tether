@@ -61,21 +61,43 @@ run inside Claude Code (version 2.1.287 or later). See the
   `run_in_background` poller, a build wait) wakes itself when that work reports, re-writing the whole context
   if the cache has gone. So Tether acts by itself, `cacheGuard.leadMinutes` (default 20; never more than half the
   cache lifetime) before the cache expires, once a minute, whatever the model is doing:
-  - **Keep warm.** A stopped agent with background work and a context under `cacheGuard.handoverTokens` (default
-    250k) is sent a short message ("keep waiting, no action needed", through `$.session.send`). The agent's reply
-    is a cache read, which re-arms the expiry. The agent is recorded as `kept-warm`; the guard is quiet for one
-    more window, counted from the later of the agent's last activity and the ping, and pings again then, up to
-    `cacheGuard.keepWarmMax` (12) times before it asks the model to decide.
+  - **Keep warm.** A stopped agent with background work, a context under `cacheGuard.handoverTokens` (default
+    250k) and **running on the session's own model** is sent a short message ("keep waiting, no action needed",
+    through `$.session.send`). The agent's reply is a cache read, which re-arms the expiry. The agent is recorded as
+    `kept-warm`; the guard is quiet for one more window, counted from the later of the agent's last activity and
+    the ping, and pings again then, up to `cacheGuard.keepWarmMax` (12) times in a row before it asks the model to
+    decide. Real work between two pings (the context grew by 10k or more) starts a new run of pings.
+  - **A ping must not switch the agent's model.** A message wakes a subagent on the *session's* model unless its
+    Agent call pinned one. Measured on 2.1.296 transcripts (`~/.claude/projects/<project>/<session>/subagents/`):
+    every wake of an agent whose `.meta.json` names a `model` (55 of 55, sonnet and haiku) kept that model, and
+    every wake of an agent without one that had run on sonnet or haiku (12 of 12, by a message or a task
+    notification) ran on the session's opus; the cache is per model, so such a ping would write a whole new cache
+    at the session model's rates and leave the agent on the dearer model. `$.session.send` takes only `to` and
+    `text`: it cannot name a model. So Tether pings only an agent whose `.meta.json` pins a model or whose last
+    request (`turn.step`, else its transcript when under 4 MB) was on the session's model (`$.session.model()`,
+    compared as `claude-opus-5-5` = `opus` = `opus[1m]`). An agent on another model, or whose model Tether cannot
+    tell, is handed over instead, whatever its size; that one wake writes one cache on the session's model, once.
   - **Hand over.** A stopped agent with background work and at least `handoverTokens` is sent the handover request
     (commit, update `STATUS.md`, list the running background jobs and their result files, say the next exact
-    command, then stop). That message is itself a cache read, so it is cheap. Only after the agent has stopped
-    (a turn ended with a request after the message) does Tether stop the background tasks it left behind
-    (`TaskStop`), and then records it `retired`: a retired agent is never woken (`SendMessage` to it is refused
-    unless the message starts with the override token, `fleet.overrideToken`). A detached build (started with
-    `nohup`/`start`, not tracked by Claude Code) keeps running, so the successor reads its result files. An
-    agent that has not finished within `cacheGuard.handoverWaitMinutes` (10) is never stopped silently: the toast,
-    the log and a wake prompt tell the model, and the Stop hook blocks. The same goes for tasks that
-    `TaskStop` would not stop, and for an agent that is waiting on background work Tether cannot identify.
+    command, then stop). That message is a cache read on the agent's own model, so it is cheap. Only after the
+    agent has stopped (a turn ended with a request after the message) does Tether look at the agent once more
+    (a task that finished meanwhile may have woken it) and stop the background tasks it left behind
+    (`TaskStop`). It records the agent `retired` on a later tick, once it has settled: not running and not
+    `waiting`. A retired agent is never woken (`SendMessage` to it is refused unless the message starts with the
+    override token, `fleet.overrideToken`). A detached build (started with `nohup`/`start`, not tracked by Claude
+    Code) keeps running, so the successor reads its result files. Nothing is ever stopped silently, and nothing is
+    retired while the agent can still wake itself: the toast, the log and a wake prompt tell the model, and the
+    Stop hook blocks, for an agent that has not finished within `cacheGuard.handoverWaitMinutes` (10; at most
+    half the lead, so the alert comes before the cache expires), for tasks that `TaskStop` would not stop or did
+    not answer within 30 s, and for an agent that is still `waiting` after its known tasks were stopped (a Monitor
+    or a background Agent that Tether cannot identify). Each kind of alert is told once per cycle; a new silence of
+    the agent is told again. The messages go out first and together, and every send and every `TaskStop` has a 30 s
+    timeout, so one blocked permission dialog cannot stall the pings due for other agents.
+  - **The guard trusts `fleet.cacheTtlMinutes`** (default 60, the one-hour cache the sessions use). It acts at that
+    value less the lead. If the real cache lifetime is shorter (the 5-minute default cache, when the one-hour cache
+    is not enabled for subagents), the cache dies long before the guard acts and nothing it does helps: set
+    `fleet.cacheTtlMinutes` to the real lifetime (at most that, with the margin you want) and `leadMinutes`
+    accordingly. A longer value than the real one is the dangerous direction.
   - **No ping on an expired cache** (it would be the re-write), and no action for a stopped agent without
     background work (it cannot wake itself): those are left to the model, below.
   Every action is a toast, a log line (`agent guard: ...`), a line in `/tether-guards` and a `guard ...` flag in the
@@ -95,8 +117,12 @@ run inside Claude Code (version 2.1.287 or later). See the
   call that lists an agent's background tasks. `$.agent.list()` says `waiting` for an agent held on background work;
   the task ids come from the rows appended to its conversation (`session.append`: "running in background with ID"
   and the `<task-notification>` that ends a task) and, for a transcript under 4 MB (the most `$.fs.read` returns),
-  from its transcript file. Only a background Bash is recognised; a monitor or a background agent started by a
-  subagent keeps the agent `waiting` but has no id for Tether to stop. Tether stops tasks, never the agent
+  from its transcript file; tasks seen in a small transcript are kept as the baseline when it later grows past
+  4 MB. Only the harness's own structure counts (a user row's `toolUseResult.backgroundTaskId` or tool result that
+  starts with the answer, and a notification block with a final status in a `queued_command` attachment or a
+  `task-notification` row), never text an agent printed or read. Only a background Bash is recognised; a monitor or a
+  background agent started by a subagent keeps the agent `waiting` but has no id for Tether to stop, which is why
+  such an agent is not retired. Tether stops tasks, never the agent
   itself (a `TaskStop` of an agent's id is possible, but it would be abrupt and lose its handover).
 - **Stop hook.** The end of a turn is blocked while a PR problem or an agent the guard has not dealt with is open,
   at most `stop.maxBlocks` times in a row for the same reason. `/tether-guards` prints what is open and what the
@@ -175,9 +201,9 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `conversationsMinSeconds` | `30` | Seconds between log writes while turns complete; a log is always written before a clear. |
 | `cacheGuardAuto` | `true` | Before a stopped agent with live background work loses its prompt cache, Tether messages it (keep waiting, or hand over) and stops the leftover background tasks after a handover. Off: it only blocks the end of a turn and asks the model. |
 | `cacheGuardLeadMinutes` | `20` | Act this many minutes before the cache expires (at most half the cache lifetime). |
-| `cacheGuardHandoverTokens` | `250000` | A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm. |
-| `cacheGuardHandoverWaitMinutes` | `10` | Minutes an agent gets to finish its handover; later the coordinator is alerted. The agent is never stopped silently. |
-| `cacheGuardKeepWarmMax` | `12` | Keep-warm messages to one agent before the coordinator is asked to decide. |
+| `cacheGuardHandoverTokens` | `250000` | A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm, if it runs on the session model (else it is handed over too). |
+| `cacheGuardHandoverWaitMinutes` | `10` | Minutes an agent gets to finish its handover (at most half the lead); later the coordinator is alerted. The agent is never stopped silently. |
+| `cacheGuardKeepWarmMax` | `12` | Keep-warm messages to one agent in a row (real work between two starts a new run) before the coordinator is asked to decide. |
 | `cacheGuardKeepWarmText` | `Tether cache guard: keep waiting, no action needed. Reply with one word, then wait as before.` | The message that keeps a waiting agent warm. |
 | `cacheGuardHandoverText` | `Tether cache guard: hand over now. Commit your work, update STATUS.md (tip, done, left, running background jobs and their logs or result files, the next exact command), then stop. Do not start new work.` | The message that asks an agent to hand over and stop. |
 | `stopEnabled` | `true` | Block the end of a turn while PR problems or stopped agents nobody has dealt with are known. |

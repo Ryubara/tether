@@ -284,19 +284,19 @@
     "cacheGuardHandoverTokens": {
       "type": "number",
       "title": "Hand over at (tokens)",
-      "description": "A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm.",
+      "description": "A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm, if it runs on the session model (else it is handed over too).",
       "default": 250000
     },
     "cacheGuardHandoverWaitMinutes": {
       "type": "number",
       "title": "Handover wait (minutes)",
-      "description": "Minutes an agent gets to finish its handover; later the coordinator is alerted. The agent is never stopped silently.",
+      "description": "Minutes an agent gets to finish its handover (at most half the lead); later the coordinator is alerted. The agent is never stopped silently.",
       "default": 10
     },
     "cacheGuardKeepWarmMax": {
       "type": "number",
       "title": "Keep-warm limit",
-      "description": "Keep-warm messages to one agent before the coordinator is asked to decide.",
+      "description": "Keep-warm messages to one agent in a row (real work between two starts a new run) before the coordinator is asked to decide.",
       "default": 12
     },
     "cacheGuardKeepWarmText": {

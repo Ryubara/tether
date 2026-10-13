@@ -4,10 +4,10 @@ import { expect, test } from 'claude-code/testing'
 
 import { DEFAULTS } from '../../src/fleet/config'
 import { coldGuard } from '../../src/fleet/guard'
-import { actAfterMinutes, decisionProblem, planActions, stopReason as agentStop, undecided, type StoppedCandidate } from '../../src/guards/agents'
+import { actAfterMinutes, decisionProblem, handoverWaitOf, planActions, sameModel, stopReason as agentStop, undecided, wakeKeepsModel, type StoppedCandidate } from '../../src/guards/agents'
 import { CACHE_GUARD_DEFAULTS, mergeCacheGuard } from '../../src/guards/config'
 import { fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason, toldProblems, unowned, unpushedProblem } from '../../src/guards/prs'
-import { EMPTY_STORE, ownerCovers, pruneOwners, readStore, recordAction, recordDecision, recordOwner, recordRerun } from '../../src/guards/store'
+import { EMPTY_STORE, NEW_CYCLE, ownerCovers, pruneOwners, readStore, recordAction, recordAlert, recordDecision, recordOwner, recordRerun } from '../../src/guards/store'
 import { parseConfig, type AgentsPoller, type PrsPoller } from '../../src/watch/config'
 import { agentFindings } from '../../src/watch/findings'
 
@@ -148,8 +148,8 @@ test('a recorded rerun owns a failed-checks problem only for the checks it reran
 })
 
 const RULES_30 = { cacheMinutes: 60, smallTokens: 60_000, leadMinutes: 20 }
-const AUTO = { handoverTokens: 250_000, handoverWaitMinutes: 10, keepWarmMax: 3 }
-const waiting = (id: string, minutes: number, ctx: number, over: Partial<StoppedCandidate> = {}): StoppedCandidate => ({ id, status: 'waiting', label: id, lastStepAt: NOW - minutes * MIN, contextTokens: ctx, tasks: ['t1'], ...over })
+const AUTO = { handoverTokens: 250_000, handoverWaitMinutes: 10, keepWarmMax: 3, sessionModel: 'claude-opus-5-5' }
+const waiting = (id: string, minutes: number, ctx: number, over: Partial<StoppedCandidate> = {}): StoppedCandidate => ({ id, status: 'waiting', label: id, lastStepAt: NOW - minutes * MIN, contextTokens: ctx, tasks: ['t1'], model: 'claude-opus-5-5', ...over })
 
 test('the lead is 20 minutes by default and never more than half a short cache', async () => {
   expect(actAfterMinutes(RULES_30)).toBe(40)
@@ -185,46 +185,116 @@ test('planActions keeps a small waiting agent warm, hands a big one over, and le
   expect(plan([{ id: 'done', status: 'completed', label: 'done', lastStepAt: NOW - 50 * MIN, contextTokens: 300_000 }])).toEqual([])
   expect(plan([{ id: 'busy', status: 'running', label: 'busy', lastStepAt: NOW - 50 * MIN, contextTokens: 300_000, tasks: ['t'] }])).toEqual([])
   // Once pinged it is quiet; the count goes up with the next window
-  const pinged = recordAction(recordDecision(EMPTY_STORE, 'small', 'kept-warm', '', 't', NOW), 'small', { warms: 1 })
+  const pinged = recordAction(recordDecision(EMPTY_STORE, 'small', 'kept-warm', '', 't', NOW), 'small', { warms: 1, warmContext: 100_000 })
   expect(plan([waiting('small', 41, 100_000)], pinged)).toEqual([])
-  expect(planActions([waiting('small', 41, 100_000, { lastStepAt: NOW })], pinged, RULES_30, AUTO, NOW + 41 * MIN)).toEqual([{ kind: 'warm', id: 'small', label: 'small', count: 2 }])
-  // Too many pings: the model is told, once
-  const worn = recordAction(EMPTY_STORE, 'small', { warms: 3 })
-  expect(plan([waiting('small', 41, 100_000)], worn)).toEqual(['alert:small'])
-  expect(plan([waiting('small', 41, 100_000)], recordAction(worn, 'small', { alertedAt: NOW }))).toEqual([])
+  expect(planActions([waiting('small', 41, 100_000, { lastStepAt: NOW })], pinged, RULES_30, AUTO, NOW + 41 * MIN)).toEqual([{ kind: 'warm', id: 'small', label: 'small', count: 2, contextTokens: 100_000 }])
+  // Too many pings in a row: the model is told, once per silence
+  const worn = recordAction(EMPTY_STORE, 'small', { warms: 3, warmContext: 100_000 })
+  const small = waiting('small', 41, 100_000)
+  expect(plan([small], worn)).toEqual(['alert:small'])
+  expect(plan([small], recordAlert(worn, 'small', 'warm-max', NOW))).toEqual([])
+  // ... but real work since the last ping (the context grew) starts a new run of pings, and a later silence is told again
+  expect(planActions([waiting('small', 41, 130_000)], worn, RULES_30, AUTO, NOW)).toEqual([{ kind: 'warm', id: 'small', label: 'small', count: 1, contextTokens: 130_000 }])
+  expect(plan([waiting('small', 41, 100_000, { lastStepAt: NOW + 2 * MIN - 41 * MIN + 41 * MIN })], recordAlert(worn, 'small', 'warm-max', NOW), NOW + 43 * MIN)).toEqual(['alert:small'])
   // An expired cache is never pinged: that would be the re-write itself
   expect(plan([waiting('late', 65, 100_000)])).toEqual(['alert:late'])
 })
 
-test('a handover is collected once the agent has stopped, alerted when late, and Tether keeps the agent out of the findings while it works', async () => {
+test('an agent whose Agent call pinned no model, on another model than the session, is handed over and never pinged', async () => {
+  const model = (id: string, over: Partial<StoppedCandidate>) => waiting(id, 41, 100_000, over)
+  const run = (agents: StoppedCandidate[], sessionModel: string | undefined) => planActions(agents, EMPTY_STORE, RULES_30, { ...AUTO, sessionModel }, NOW).map(p => `${p.kind}:${p.id}${p.kind === 'handover' ? ':' + p.why : ''}`)
+  const agents = [
+    model('same', { model: 'claude-opus-5-5' }),
+    model('other', { model: 'claude-sonnet-5-5' }),
+    model('pinned', { model: 'claude-sonnet-5-5', pinned: true }),
+    model('unknown', { model: undefined }),
+  ]
+  expect(run(agents, 'claude-opus-5-5')).toEqual(['warm:same', 'handover:other:model', 'warm:pinned', 'handover:unknown:model'])
+  // An alias or a suffix of the same model is the same model; without the session's model only a pinned agent is safe
+  expect(run([model('same', { model: 'claude-opus-5-5' })], 'opus[1m]')).toEqual(['warm:same'])
+  expect(run(agents, undefined)).toEqual(['handover:same:model', 'handover:other:model', 'warm:pinned', 'handover:unknown:model'])
+  // A big context is a handover whatever the model
+  expect(run([model('big', { model: 'claude-opus-5-5', contextTokens: 300_000 })], 'claude-opus-5-5')).toEqual(['handover:big:size'])
+})
+
+test('sameModel compares names the way the engine spells them', async () => {
+  expect(sameModel('claude-opus-5-5', 'claude-opus-5-5')).toBe(true)
+  expect(sameModel('claude-opus-5-5', 'opus')).toBe(true)
+  expect(sameModel('claude-opus-5-5', 'opus[1m]')).toBe(true)
+  expect(sameModel('claude-opus-5-5-20261001', 'claude-opus-5-5')).toBe(true)
+  expect(sameModel('claude-sonnet-5-5', 'claude-opus-5-5')).toBe(false)
+  expect(sameModel('claude-opus-4-1', 'claude-opus-5-5')).toBe(false)
+  expect(sameModel('claude-sonnet-5-5', 'opus')).toBe(false)
+  expect(sameModel(undefined, 'opus')).toBe(false)
+  expect(wakeKeepsModel({ model: 'claude-haiku-5-5', pinned: true }, 'opus')).toBe(true)
+  expect(wakeKeepsModel({}, 'opus')).toBe(false)
+})
+
+test('the handover wait is cut to half the lead so the alert comes before the cache expires', async () => {
+  expect(handoverWaitOf(RULES_30, AUTO)).toBe(10)
+  expect(handoverWaitOf({ ...RULES_30, leadMinutes: 5 }, AUTO)).toBe(2.5)
+  const asked = recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 3 * MIN })
+  const plan = (rules = RULES_30) => planActions([waiting('big', 41, 300_000, { status: 'running', lastStepAt: NOW - MIN })], asked, rules, AUTO, NOW)
+  expect(plan()).toEqual([])
+  expect(plan({ ...RULES_30, leadMinutes: 5 })).toMatchObject([{ kind: 'alert', key: 'handover-late' }])
+})
+
+test('a handover is collected once the agent has stopped, retired only when it is quiet, and alerted when late', async () => {
   const asked = recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 3 * MIN })
   const plan = (a: StoppedCandidate, store = asked, now = NOW) => planActions([a], store, RULES_30, AUTO, now)
   // Still running its handover, or no turn ended since the ask: nothing yet
   expect(plan(waiting('big', 41, 300_000, { status: 'running', lastStepAt: NOW - MIN }))).toEqual([])
   expect(plan(waiting('big', 41, 300_000, { finishedAt: NOW - 10 * MIN, lastStepAt: NOW - 10 * MIN }))).toEqual([])
-  // It stopped after the ask: its leftover tasks are collected
+  // It stopped after the ask: its leftover tasks are collected, and it is not retired yet
   const done = waiting('big', 41, 300_000, { finishedAt: NOW - MIN, lastStepAt: NOW - 2 * MIN, tasks: ['t1', 't2'] })
-  expect(plan(done)).toEqual([{ kind: 'collect', id: 'big', label: 'big', tasks: ['t1', 't2'], unknown: false }])
-  // Waiting on background work whose ids are unknown is said, not guessed
-  expect(plan({ ...done, tasks: [] })).toEqual([{ kind: 'collect', id: 'big', label: 'big', tasks: [], unknown: true }])
+  expect(plan(done)).toEqual([{ kind: 'collect', id: 'big', label: 'big', tasks: ['t1', 't2'] }])
+  // Waiting on background work whose ids are unknown is said, once, and the agent is not retired
+  const blind = { ...done, tasks: [] }
+  expect(plan(blind)).toMatchObject([{ kind: 'alert', key: 'still-waiting' }])
+  expect(plan(blind, recordAlert(asked, 'big', 'still-waiting', NOW))).toEqual([])
+  // Nothing to stop and nothing it waits on: retired at once
+  expect(plan({ ...blind, status: 'completed' })).toEqual([{ kind: 'retire', id: 'big', label: 'big', stopped: 0 }])
   // After a failed stop it is not retried
   expect(plan(done, recordAction(asked, 'big', { stopFailedAt: NOW }))).toEqual([])
+  // After the stops: wait for it to settle, then retire only a quiet agent; one still waiting is an alert
+  const stopped = recordAction(asked, 'big', { tasksStoppedAt: NOW - 30_000, stoppedCount: 2 })
+  const quiet = { ...done, tasks: [], status: 'completed' }
+  expect(plan(quiet, stopped)).toEqual([])
+  const later = recordAction(asked, 'big', { tasksStoppedAt: NOW - 2 * MIN, stoppedCount: 2 })
+  expect(plan(quiet, later)).toEqual([{ kind: 'retire', id: 'big', label: 'big', stopped: 2 }])
+  expect(plan({ ...quiet, status: 'running' }, later)).toEqual([])
+  expect(plan({ ...quiet, status: 'waiting' }, later)).toMatchObject([{ kind: 'alert', key: 'still-waiting' }])
+  expect(plan({ ...quiet, status: 'waiting' }, recordAlert(later, 'big', 'still-waiting', NOW))).toEqual([])
   // Late: an alert, once, naming that it is not stopped
   const late = waiting('big', 55, 300_000, { status: 'running' })
-  const [alert] = plan(late, recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 11 * MIN }))
-  expect(alert).toMatchObject({ kind: 'alert' })
+  const lateStore = recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 11 * MIN })
+  const [alert] = plan(late, lateStore)
+  expect(alert).toMatchObject({ kind: 'alert', key: 'handover-late' })
   expect((alert as { text: string }).text).toContain('NOT stopped')
-  expect(plan(late, recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 11 * MIN, alertedAt: NOW }))).toEqual([])
-  // Findings: not while Tether has it in hand; yes once late or when the stop failed
+  expect(plan(late, recordAlert(lateStore, 'big', 'handover-late', NOW))).toEqual([])
+  // Findings: not while Tether has it in hand; yes once late, when it is still waiting, or when the stop failed
   const idle = waiting('big', 45, 300_000)
   expect(undecided([idle], asked, RULES_30, NOW)).toEqual([])
-  expect(undecided([idle], recordAction(asked, 'big', { alertedAt: NOW }), RULES_30, NOW)[0]?.text).toContain('NOT stopped')
-  expect(undecided([{ ...idle, status: 'running' }], recordAction(asked, 'big', { alertedAt: NOW }), RULES_30, NOW).length).toBe(1)
+  const told = recordAlert(asked, 'big', 'handover-late', NOW)
+  expect(undecided([idle], told, RULES_30, NOW)[0]?.text).toContain('NOT stopped')
+  expect(undecided([{ ...idle, status: 'running' }], told, RULES_30, NOW).length).toBe(1)
+  expect(undecided([idle], recordAlert(asked, 'big', 'still-waiting', NOW), RULES_30, NOW)[0]?.text).toContain('cannot identify')
   expect(undecided([idle], recordAction(asked, 'big', { stopFailedAt: NOW }), RULES_30, NOW)[0]?.text).toContain('could not be stopped')
   // Retired ends it all
   const retired = recordDecision(asked, 'big', 'retired', '', 't', NOW)
   expect(plan(done, retired)).toEqual([])
-  expect(undecided([idle], recordAction(retired, 'big', { alertedAt: NOW }), RULES_30, NOW)).toEqual([])
+  expect(undecided([idle], recordAlert(retired, 'big', 'handover-late', NOW), RULES_30, NOW)).toEqual([])
+})
+
+test('an alert is told once per problem and cycle: a new silence, or another kind, is told again', async () => {
+  const gone = waiting('a', 65, 100_000)
+  const once = recordAlert(EMPTY_STORE, 'a', 'expired', NOW)
+  expect(planActions([gone], once, RULES_30, AUTO, NOW)).toEqual([])
+  // Another kind of problem for the same agent is not hidden by the first
+  const worn = recordAction(once, 'a', { warms: 3 })
+  expect(planActions([waiting('a', 41, 100_000)], worn, RULES_30, AUTO, NOW)).toMatchObject([{ kind: 'alert', key: 'warm-max' }])
+  // The agent worked since the alert (its last request is newer), expired again later: told again
+  expect(planActions([waiting('a', 65, 100_000, { lastStepAt: NOW + MIN })], once, RULES_30, AUTO, NOW + 66 * MIN)).toMatchObject([{ kind: 'alert', key: 'expired' }])
 })
 
 test('decisionProblem refuses retired and done for an agent that is running or will wake itself, and says TaskStop it first', async () => {
@@ -243,9 +313,11 @@ test('the blocking reason names the two ways out, and the store keeps the action
   const text = agentStop([{ id: 'a', text: 'a: stopped 45 min' }])
   expect(text).toMatch(/keep it warm.*SendMessage.*kept-warm/)
   expect(text).toMatch(/hand it over and stop it.*TaskStop.*retired/)
-  const store = recordAction(recordAction(EMPTY_STORE, 'a', { handoverAt: 5 }), 'a', { warms: 2, alertedAt: 9 })
-  expect(readStore(JSON.parse(JSON.stringify(store))).actions['a']).toEqual({ warms: 2, handoverAt: 5, alertedAt: 9 })
-  expect(readStore({ actions: { x: { warms: 'many' }, y: { warms: 1, handoverAt: 'soon' } } }).actions).toEqual({ y: { warms: 1 } })
+  const store = recordAlert(recordAction(recordAction(EMPTY_STORE, 'a', { handoverAt: 5 }), 'a', { warms: 2, warmContext: 7, tasksStoppedAt: 8, stoppedCount: 2 }), 'a', 'handover-late', 9)
+  expect(readStore(JSON.parse(JSON.stringify(store))).actions['a']).toEqual({ warms: 2, warmContext: 7, handoverAt: 5, tasksStoppedAt: 8, stoppedCount: 2, alerts: { 'handover-late': 9 } })
+  expect(readStore({ actions: { x: { warms: 'many' }, y: { warms: 1, handoverAt: 'soon' } } }).actions).toEqual({ y: { warms: 1, alerts: {} } })
+  // A new cycle clears the handover and what it left, and keeps the pings and the told alerts
+  expect(recordAction(store, 'a', NEW_CYCLE).actions['a']).toMatchObject({ warms: 2, alerts: { 'handover-late': 9 }, handoverAt: undefined, tasksStoppedAt: undefined })
 })
 
 test('mergeCacheGuard reads the section over the defaults and ignores what is not valid', async () => {

@@ -72,6 +72,9 @@ export type AgentSeen = {
   /** Its live background tasks (read from its transcript), and when its last turn ended; see StoppedCandidate. */
   tasks?: string[]
   finishedAt?: number
+  /** The model of its last request, and whether the Agent call pinned one (a wake keeps a pinned model); see StoppedCandidate. */
+  model?: string
+  pinned?: boolean
 }
 
 /** What the agent guard needs besides the poller: the decisions made, and the thresholds fleet shares. */

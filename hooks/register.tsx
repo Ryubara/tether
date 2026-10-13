@@ -11,7 +11,7 @@ import { DEFAULTS, mergeConfig, type FleetConfig } from '../src/fleet/config'
 import { coldGuard } from '../src/fleet/guard'
 import { recordStep, type Ledger } from '../src/fleet/ledger'
 import { buildRows, GUARD_MARK, summary, tokens, type AgentLike, type RateLimit, type Row } from '../src/fleet/rows'
-import { appendedText, lastRequest, liveTasks, metaDescription, scanTasks, subagentsDir } from '../src/fleet/transcript'
+import { lastRequest, liveTasks, metaDescription, metaModel, noteAppendedRow, subagentsDir } from '../src/fleet/transcript'
 import { Boxes, parseState, type WatchState } from '../src/fleet/boxes'
 import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type Poller, type WatchConfig } from '../src/watch/config'
@@ -20,10 +20,10 @@ import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type AgentSeen
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
-import { decisionProblem, planActions, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
+import { alerted, decisionProblem, planActions, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
 import { CACHE_GUARD_DEFAULTS, mergeCacheGuard, type CacheGuardConfig } from '../src/guards/config'
 import { ACTIVE_RERUN, GH_FIELDS, fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
-import { pruneOwners, readStore, recordAction, recordDecision, recordOwner, recordRerun, type GuardStore } from '../src/guards/store'
+import { NEW_CYCLE, pruneOwners, readStore, recordAction, recordAlert, recordDecision, recordOwner, recordRerun, type GuardStore } from '../src/guards/store'
 import { layered } from '../src/options/options'
 import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
 import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
@@ -204,6 +204,7 @@ async function backfill($: any): Promise<void> {
           const last = lastRequest(await $.fs.read(base + '.jsonl'))
           // steps 0 marks an entry read from the transcript; the next real request replaces it
           if (last) {
+            if (last.model && !agentModels.has(a.id)) agentModels.set(a.id, last.model)
             ledger.set(a.id, { id: a.id, lastStepAt: last.at, contextTokens: last.contextTokens, cacheWritten: 0, coldWritten: 0, steps: 0 })
             break
           }
@@ -501,7 +502,11 @@ async function agentsSeen($: any, now: number): Promise<AgentSeen[]> {
   await loadTasks($)
   // The background tasks of the agents that are not running: the ones that can wake themselves
   const tasks = new Map<string, string[]>()
-  for (const a of list) if (a.status !== 'running' && a.status !== 'failed' && a.status !== 'killed') tasks.set(a.id, await tasksOf($, a.id, now))
+  const pinned = new Map<string, boolean>()
+  for (const a of list) {
+    if (a.status !== 'running' && a.status !== 'failed' && a.status !== 'killed') tasks.set(a.id, await tasksOf($, a.id, now))
+    pinned.set(a.id, await pinnedOf($, a.id, now))
+  }
   return list.map(a => {
     if (!firstSeen.has(a.id)) firstSeen.set(a.id, now)
     const s = steps.get(a.id)
@@ -514,6 +519,8 @@ async function agentsSeen($: any, now: number): Promise<AgentSeen[]> {
       ...(s ? { contextTokens: s.context } : l ? { contextTokens: l.contextTokens } : {}),
       ...(finished.has(a.id) ? { finishedAt: finished.get(a.id)! } : {}),
       ...(tasks.has(a.id) ? { tasks: tasks.get(a.id)! } : {}),
+      ...(agentModels.get(a.id) ? { model: agentModels.get(a.id)! } : {}),
+      ...(pinned.get(a.id) ? { pinned: true } : {}),
     }
   })
 }
@@ -750,6 +757,7 @@ async function* watchStep($: any, e: any, next: any): any {
   const result: any = yield* next(e)
   const id = (e as any).agentId
   const u = result?.usage
+  if (id && typeof (e as any).model === 'string') agentModels.set(id, (e as any).model)
   if (id && u) {
     const context = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
     steps.set(id, { at: await $.clock.now(), context })
@@ -955,21 +963,62 @@ function localStamp(ms: number): string {
 let gCfg: CacheGuardConfig = CACHE_GUARD_DEFAULTS
 let guardTimer: { cancel: () => void } | undefined
 let guardTicking = false
-/** Live background tasks by agent id, from the rows appended to its conversation (the only per-agent source for a transcript too big to read). */
+/** When the running tick started: a tick stuck for longer than GUARD_TICK_MAX_MS no longer blocks the next one. */
+let guardTickStart = 0
+const GUARD_TICK_MAX_MS = 5 * 60_000
+/** The longest one send or one TaskStop may take; a permission dialog nobody answers must not stall the other agents. */
+const ACTION_TIMEOUT_MS = 30_000
+/** Live background tasks by agent id, from the rows appended to its conversation and the last readable transcript. */
 const bgTasks = new Map<string, Set<string>>()
 let tasksLoaded = false
+/** Task ids Tether stopped itself: not live any more, whatever the transcript still shows until its notification is written. */
+const stoppedIds = new Set<string>()
 /** A transcript larger than this is not read: `$.fs.read` rejects a file over 4 MiB. */
 const FS_READ_LIMIT = 4_000_000
-/** The task list read from a transcript, by agent, valid while the file's mtime stands. */
+/** What a transcript showed, by agent, valid while the file's mtime stands. */
 const taskCache = new Map<string, { mtime: number; tasks: string[] }>()
+/** The model of each subagent's last request: from turn.step, else the transcript. */
+const agentModels = new Map<string, string>()
+/** Whether the Agent call pinned a model for the agent (its .meta.json names one), once looked up. */
+const pinnedModels = new Map<string, boolean>()
 /** The flags the pane shows for what the guard did, by agent id. */
 const guardMarks = new Map<string, string[]>()
 /** What the guard did, newest last, for /tether-guards. */
 const guardNotes: string[] = []
 /** The last failure told per agent, so a persistent one is logged once. */
 const guardErrors = new Map<string, string>()
-/** Alerts already told (agent and text), so one that could not be saved is not told every tick. */
+/** Alerts already told (agent, kind and cycle), so one that could not be saved is not told every tick. */
 const toldAlerts = new Set<string>()
+/** Serialises the guard store's read-modify-write cycles (the tick, the decision tool, the Stop hook). */
+let storeChain: Promise<unknown> = Promise.resolve()
+
+/** Changes the guard store under a lock, so two writers cannot overwrite each other's change. */
+function updateGuardStore($: any, change: (s: GuardStore) => GuardStore): Promise<GuardStore> {
+  const run = storeChain.then(async () => {
+    const next = change(await guardStore($))
+    await saveGuardStore($, next)
+    return next
+  })
+  storeChain = run.catch(() => undefined)
+  return run
+}
+
+/** Runs `p`, but gives up (rejects) after `ms`, so one blocked call cannot stall the tick. */
+function withTimeout<T>($: any, p: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = $.clock.after(ms, () => reject(new Error(`${what} did not answer in ${Math.round(ms / 1000)} s`)))
+    p.then(
+      v => {
+        timer.cancel?.()
+        resolve(v)
+      },
+      err => {
+        timer.cancel?.()
+        reject(err)
+      },
+    )
+  })
+}
 
 /** The thresholds the agent guard works to. */
 function agentRules(): AgentRules {
@@ -993,23 +1042,54 @@ async function loadTasks($: any): Promise<void> {
   }
 }
 
-/** Notes the background tasks a row appended to a subagent's conversation starts or ends. */
-async function noteRow($: any, e: any): Promise<void> {
-  const id = e.agentId
-  if (typeof id !== 'string') return
-  const text = appendedText(e.message?.content)
-  if (!text.includes('in background with ID') && !text.includes('<task-id>')) return
-  await loadTasks($)
-  const live = bgTasks.get(id) ?? new Set<string>()
-  const before = [...live].join()
-  scanTasks(text, live)
-  if ([...live].join() === before) return
-  bgTasks.set(id, live)
+/** Keeps the live task sets in $.store, so a reload or a restart still knows them. */
+async function persistTasks($: any): Promise<void> {
   await $.store.set(`guards:tasks:${wcfg.storeName}`, Object.fromEntries([...bgTasks].filter(([, t]) => t.size > 0).map(([k, t]) => [k, [...t]])))
 }
 
-/** The live background tasks of a subagent: its transcript when small enough to read, else what the appended rows showed. */
+/** Notes the background tasks a row appended to a subagent's conversation starts or ends (by the row's structure, not its words). */
+async function noteRow($: any, e: any): Promise<void> {
+  const id = e.agentId
+  if (typeof id !== 'string' || (e.message?.type !== 'user' && e.message?.type !== 'attachment')) return
+  await loadTasks($)
+  const live = bgTasks.get(id) ?? new Set<string>()
+  const before = [...live].join()
+  noteAppendedRow(e, live)
+  if ([...live].join() === before) return
+  bgTasks.set(id, live)
+  await persistTasks($)
+}
+
+/** Whether the Agent call pinned a model for an agent (its .meta.json): a message then wakes it on that model, not the session's. */
+async function pinnedOf($: any, id: string, now: number): Promise<boolean> {
+  const known = pinnedModels.get(id)
+  if (known !== undefined) return known
+  try {
+    const bases = await transcriptsOf($, id, now)
+    let looked = false
+    for (const base of bases) {
+      if (!(await $.fs.exists(base + '.meta.json'))) continue
+      looked = true
+      if (metaModel(String(await $.fs.read(base + '.meta.json'))) !== undefined) {
+        pinnedModels.set(id, true)
+        return true
+      }
+    }
+    // Remember a "no" only once a meta file was actually read
+    if (looked) pinnedModels.set(id, false)
+  } catch {
+    // Unreadable: not proven pinned
+  }
+  return false
+}
+
+/**
+ * The live background tasks of a subagent. A transcript small enough to read is the truth and becomes the baseline
+ * the appended rows go on from, so tasks seen there are kept when the file later grows past the read limit; a bigger
+ * one leaves the appended rows (and that baseline) as the only source. Tasks Tether stopped itself are left out.
+ */
 async function tasksOf($: any, id: string, now: number): Promise<string[]> {
+  let tasks: string[] | undefined
   try {
     const bases = await transcriptsOf($, id, now)
     if (bases.length > 0) {
@@ -1017,16 +1097,26 @@ async function tasksOf($: any, id: string, now: number): Promise<string[]> {
       const st = await $.fs.stat(file)
       if (st.size <= FS_READ_LIMIT) {
         const known = taskCache.get(id)
-        if (known && known.mtime === st.mtimeMs) return known.tasks
-        const tasks = liveTasks(String(await $.fs.read(file)))
-        taskCache.set(id, { mtime: st.mtimeMs, tasks })
-        return tasks
+        if (known && known.mtime === st.mtimeMs) tasks = known.tasks
+        else {
+          const text = String(await $.fs.read(file))
+          tasks = liveTasks(text)
+          taskCache.set(id, { mtime: st.mtimeMs, tasks })
+          if (!agentModels.has(id)) {
+            const last = lastRequest(text)
+            if (last?.model) agentModels.set(id, last.model)
+          }
+        }
+        if (tasks.join() !== [...(bgTasks.get(id) ?? [])].join()) {
+          bgTasks.set(id, new Set(tasks))
+          await persistTasks($)
+        }
       }
     }
   } catch {
     // An unreadable transcript leaves the appended rows as the source
   }
-  return [...(bgTasks.get(id) ?? [])]
+  return (tasks ?? [...(bgTasks.get(id) ?? [])]).filter(t => !stoppedIds.has(t))
 }
 
 /** What the guard did, as pane flags: pinged, asked to hand over, handed over. */
@@ -1038,7 +1128,7 @@ function refreshMarks(store: GuardStore): void {
     else if (act?.handoverAt !== undefined) guardMarks.set(id, [`${GUARD_MARK}handed over ${clockOf(act.handoverAt)}`])
   }
   for (const [id, act] of Object.entries(store.actions)) {
-    if (act.handoverAt !== undefined && !guardMarks.has(id)) guardMarks.set(id, [`${GUARD_MARK}handover asked ${clockOf(act.handoverAt)}${act.alertedAt !== undefined ? ' LATE' : ''}`])
+    if (act.handoverAt !== undefined && !guardMarks.has(id)) guardMarks.set(id, [`${GUARD_MARK}handover asked ${clockOf(act.handoverAt)}${alerted(act, 'handover-late', act.handoverAt) ? ' LATE' : ''}`])
   }
 }
 
@@ -1057,7 +1147,7 @@ async function reportGuard($: any, text: string, now: number, alert?: { id: stri
 /** Messages a subagent through the plugin API; the reason when it was not delivered. */
 async function sendToAgent($: any, id: string, text: string): Promise<{ ok: true } | { ok: false; reason: string }> {
   try {
-    const r = await $.session.send({ to: { agentId: id }, text })
+    const r = await withTimeout($, $.session.send({ to: { agentId: id }, text }), ACTION_TIMEOUT_MS, 'session.send')
     return r?.isDelivered ? { ok: true } : { ok: false, reason: String(r?.reason ?? 'not delivered') }
   } catch (err) {
     return { ok: false, reason: String(err) }
@@ -1069,11 +1159,14 @@ async function stopTasks($: any, tasks: string[]): Promise<string[]> {
   const problemsOut: string[] = []
   for (const t of tasks) {
     try {
-      const r: any = await $.tool.call({ tool: 'TaskStop', task_id: t })
+      const r: any = await withTimeout($, $.tool.call({ tool: 'TaskStop', task_id: t }), ACTION_TIMEOUT_MS, 'TaskStop')
       const why = r?.deny ?? (r?.isError ? (r?.text ?? 'error') : undefined)
       if (why !== undefined && !/not found|no such|no task|not running|already/i.test(String(why))) problemsOut.push(`${t}: ${String(why).slice(0, 120)}`)
+      else stoppedIds.add(t)
     } catch (err) {
       problemsOut.push(`${t}: ${String(err).slice(0, 120)}`)
+      // A call that is not answered (a permission dialog nobody sees) would hold up every task after it too
+      if (/did not answer/.test(String(err))) break
     }
   }
   return problemsOut
@@ -1086,37 +1179,54 @@ function failedOnce($: any, id: string, text: string): void {
   $.ui.log(`agent guard: ${text}`)
 }
 
+/** The engine's current word on one agent (a fresh $.agent.list), or undefined when it cannot be read. */
+async function agentNow($: any, id: string): Promise<{ status: string } | undefined> {
+  try {
+    return ((await $.agent.list()) as Array<{ id: string; status: string }>).find(a => a.id === id)
+  } catch {
+    return undefined
+  }
+}
+
 /** Carries out one planned action; the store changes only for what succeeded. */
 async function runPlan($: any, plan: Plan, now: number): Promise<void> {
   const at = localStamp(now).replace('T', ' ').slice(0, 16)
-  const store = await guardStore($)
   if (plan.kind === 'warm') {
     const sent = await sendToAgent($, plan.id, gCfg.keepWarmText)
     if (!sent.ok) return failedOnce($, plan.id, `keep-warm of ${plan.label} (${plan.id}) failed: ${sent.reason}`)
-    await saveGuardStore($, recordAction(recordDecision(store, plan.id, 'kept-warm', `Tether pinged it (${plan.count})`, at, now), plan.id, { warms: plan.count }))
+    await updateGuardStore($, s => recordAction(recordDecision(s, plan.id, 'kept-warm', `Tether pinged it (${plan.count})`, at, now), plan.id, { ...NEW_CYCLE, warms: plan.count, warmContext: plan.contextTokens }))
     await reportGuard($, `kept ${plan.label} (${plan.id}) warm (ping ${plan.count}); its background work goes on`, now)
   } else if (plan.kind === 'handover') {
     const sent = await sendToAgent($, plan.id, gCfg.handoverText)
     if (!sent.ok) return failedOnce($, plan.id, `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`)
-    await saveGuardStore($, recordAction(store, plan.id, { handoverAt: now }))
-    await reportGuard($, `asked ${plan.label} (${plan.id}, ${tokens(plan.contextTokens)} context) to hand over and stop; its background tasks are stopped once it has`, now)
+    await updateGuardStore($, s => recordAction(s, plan.id, { ...NEW_CYCLE, warms: 0, handoverAt: now }))
+    const why = plan.why === 'model' ? `; it runs on ${plan.model ?? 'an unknown model'}, so a ping would wake it on the session's model and write a new cache` : ''
+    await reportGuard($, `asked ${plan.label} (${plan.id}, ${tokens(plan.contextTokens)} context) to hand over and stop${why}; its background tasks are stopped once it has`, now)
   } else if (plan.kind === 'collect') {
-    if (plan.unknown) {
-      await saveGuardStore($, recordAction(store, plan.id, { stopFailedAt: now }))
-      return reportGuard($, `${plan.label} (${plan.id}) handed over but is still waiting on background work Tether cannot identify; TaskStop its tasks yourself (see /tasks), then record it as retired`, now, { id: plan.id })
-    }
-    const failed = await stopTasks($, plan.tasks)
+    // The plan is a few seconds old: look again before stopping anything, as a finishing task may have woken the agent
+    const live = await agentNow($, plan.id)
+    if (!live || live.status === 'running') return
+    const tasks = await tasksOf($, plan.id, now)
+    if (tasks.length === 0) return
+    const failed = await stopTasks($, tasks)
     if (failed.length > 0) {
-      await saveGuardStore($, recordAction(store, plan.id, { stopFailedAt: now }))
+      await updateGuardStore($, s => recordAction(s, plan.id, { stopFailedAt: now }))
       return reportGuard($, `${plan.label} (${plan.id}) handed over but TaskStop failed for ${failed.join('; ')}; stop them yourself, then record it as retired`, now, { id: plan.id })
     }
-    const n = plan.tasks.length
-    await saveGuardStore($, recordDecision(store, plan.id, 'retired', `handed over; ${n} background task${n === 1 ? '' : 's'} stopped`, at, now))
-    await reportGuard($, `${plan.label} (${plan.id}) handed over and is retired; stopped ${n} background task${n === 1 ? '' : 's'}${n ? ` (${plan.tasks.join(', ')})` : ''}. Start a fresh agent from its STATUS.md`, now, { id: plan.id })
+    const n = tasks.length
+    await updateGuardStore($, s => recordAction(s, plan.id, { tasksStoppedAt: now, stoppedCount: n }))
+    await reportGuard($, `${plan.label} (${plan.id}) handed over; stopped ${n} background task${n === 1 ? '' : 's'} (${tasks.join(', ')}). It is retired once it has settled and waits on nothing else`, now)
+  } else if (plan.kind === 'retire') {
+    const live = await agentNow($, plan.id)
+    if (!live || live.status === 'running' || live.status === 'waiting') return
+    const n = plan.stopped
+    await updateGuardStore($, s => recordDecision(s, plan.id, 'retired', `handed over; ${n} background task${n === 1 ? '' : 's'} stopped`, at, now))
+    await reportGuard($, `${plan.label} (${plan.id}) handed over and is retired${n ? `; ${n} background task${n === 1 ? '' : 's'} stopped` : ''}. Start a fresh agent from its STATUS.md`, now, { id: plan.id })
   } else {
-    await saveGuardStore($, recordAction(store, plan.id, { alertedAt: now }))
-    if (toldAlerts.has(`${plan.id}|${plan.text.slice(0, 40)}`)) return
-    toldAlerts.add(`${plan.id}|${plan.text.slice(0, 40)}`)
+    await updateGuardStore($, s => recordAlert(s, plan.id, plan.key, now))
+    const told = `${plan.id}|${plan.key}|${plan.since}`
+    if (toldAlerts.has(told)) return
+    toldAlerts.add(told)
     await reportGuard($, plan.text, now, { id: plan.id })
   }
   guardErrors.delete(plan.id)
@@ -1132,18 +1242,32 @@ async function refreshUndecided($: any): Promise<Undecided[]> {
   return lastUndecided
 }
 
-/** One guard tick: refresh the findings, then do what planActions says; never overlaps itself. */
+/**
+ * One guard tick: refresh the findings, then do what planActions says; never overlaps itself (a tick stuck for
+ * five minutes no longer blocks the next). The messages go out first and together, so no stop or alert can delay a
+ * ping that is due; one failing plan does not stop the others.
+ */
 async function guardTick($: any): Promise<void> {
-  if (guardTicking || !cfg.enabled) return
+  const started = Date.now()
+  if (!cfg.enabled || (guardTicking && started - guardTickStart < GUARD_TICK_MAX_MS)) return
   guardTicking = true
+  guardTickStart = started
   try {
     const now = await $.clock.now()
     const seen = await agentsSeen($, now)
     if (gCfg.auto) {
       const store = await guardStore($)
-      const auto = { handoverTokens: gCfg.handoverTokens, handoverWaitMinutes: gCfg.handoverWaitMinutes, keepWarmMax: gCfg.keepWarmMax }
+      let sessionModel: string | undefined
+      try {
+        sessionModel = String(await $.session.model())
+      } catch {
+        // Unknown: no agent is then proven safe to ping unless its Agent call pinned a model
+      }
+      const auto = { handoverTokens: gCfg.handoverTokens, handoverWaitMinutes: gCfg.handoverWaitMinutes, keepWarmMax: gCfg.keepWarmMax, ...(sessionModel ? { sessionModel } : {}) }
       const plans = planActions(seen, store, agentRules(), auto, now)
-      for (const plan of plans) await runPlan($, plan, now)
+      const safely = (plan: Plan) => runPlan($, plan, now).catch(err => failedOnce($, plan.id, `${plan.kind} of ${plan.label} (${plan.id}) failed: ${err}`))
+      await Promise.all(plans.filter(x => x.kind === 'warm' || x.kind === 'handover').map(safely))
+      for (const plan of plans.filter(x => x.kind !== 'warm' && x.kind !== 'handover')) await safely(plan)
     }
     const store = await guardStore($)
     refreshMarks(store)
@@ -1262,7 +1386,7 @@ async function prOwnerCall($: any, e: any): Promise<any> {
   if (who === '') return { deny: 'an assignment needs who' }
   const now = await $.clock.now()
   const cause = typeof e.cause === 'string' && e.cause.trim() !== '' ? e.cause.trim() : undefined
-  await saveGuardStore($, recordOwner(await guardStore($), pr, who, hours, String(e.note ?? ''), now, localStamp(now).replace('T', ' ').slice(0, 16), cause))
+  await updateGuardStore($, s => recordOwner(s, pr, who, hours, String(e.note ?? ''), now, localStamp(now).replace('T', ' ').slice(0, 16), cause))
   return toolText(`#${pr} ${e.kind === 'waive' ? 'waived' : 'assigned to ' + who} for ${hours} h${cause ? ` (cause ${cause})` : ''}.`)
 }
 
@@ -1284,9 +1408,11 @@ async function agentDecisionCall($: any, e: any): Promise<any> {
   const problem = decisionProblem(e.decision, known)
   if (problem) return { deny: `agent_decision refused: ${problem}` }
   const key = known?.id ?? id
-  const store = await guardStore($)
-  const recorded = recordDecision(store, key, e.decision, String(e.note ?? ''), localStamp(now).replace('T', ' ').slice(0, 16), now)
-  await saveGuardStore($, e.decision === 'kept-warm' ? recordAction(recorded, key, { warms: (store.actions[key]?.warms ?? 0) + 1 }) : recorded)
+  await updateGuardStore($, s => {
+    const recorded = recordDecision(s, key, e.decision, String(e.note ?? ''), localStamp(now).replace('T', ' ').slice(0, 16), now)
+    // Kept-warm is a new cycle: an earlier handover (late, or failed) no longer applies to an agent that goes on working
+    return e.decision === 'kept-warm' ? recordAction(recorded, key, { ...NEW_CYCLE, warms: (s.actions[key]?.warms ?? 0) + 1, ...(known?.contextTokens !== undefined ? { warmContext: known.contextTokens } : {}) }) : recorded
+  })
   await refreshUndecided($).catch(() => lastUndecided)
   return toolText(`${id} recorded as ${e.decision}.`)
 }

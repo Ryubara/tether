@@ -27,6 +27,12 @@ type World = {
   logs: string[]
   /** The context of the next model request. */
   context: number
+  /** The session's model (`$.session.model()`). */
+  sessionModel: string
+  /** The content of agent a1's .meta.json, when it has one. */
+  meta?: string
+  /** session.send / TaskStop never answer (a blocked permission dialog). */
+  hang: { send?: boolean; taskStop?: boolean }
 }
 
 const world = (over: Partial<World> = {}): World => ({
@@ -42,6 +48,8 @@ const world = (over: Partial<World> = {}): World => ({
   toasts: [],
   logs: [],
   context: 150_000,
+  sessionModel: 'claude-opus-5-5',
+  hang: {},
   ...over,
 })
 
@@ -59,12 +67,14 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('command.register', () => ({ value: undefined }))
   on('tool.register', () => ({ value: { tool: 'x' } }))
   const isTranscript = (p: string) => p.replace(/\\/g, '/').endsWith('/s1/subagents/agent-a1.jsonl')
-  on('fs.exists', ($: any, e: any) => ({ value: e.path.endsWith('tether.json') || isTranscript(e.path) }))
+  const isMeta = (p: string) => p.replace(/\\/g, '/').endsWith('/s1/subagents/agent-a1.meta.json')
+  on('fs.exists', ($: any, e: any) => ({ value: e.path.endsWith('tether.json') || isTranscript(e.path) || (isMeta(e.path) && w.meta !== undefined) }))
   on('fs.list', () => ({ value: [{ name: 's1', kind: 'dir', size: 0 }] }))
   on('fs.stat', () => ({ value: { kind: 'file', size: w.size, mtimeMs: w.mtime, isLink: false } }))
   on('env.get', ($: any, e: any) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }))
   on('session.cwd', () => ({ value: '/work' }))
-  on('fs.read', ($: any, e: any) => ({ value: isTranscript(e.path) ? w.transcript : e.path.endsWith('tether.json') ? JSON.stringify(config) : '' }))
+  on('fs.read', ($: any, e: any) => ({ value: isTranscript(e.path) ? w.transcript : isMeta(e.path) ? (w.meta ?? '') : e.path.endsWith('tether.json') ? JSON.stringify(config) : '' }))
+  on('session.model', () => ({ value: w.sessionModel }))
   on('fs.write', () => ({ value: undefined }))
   on('process.run', () => ({ value: { stdout: '', stderr: '', exitCode: 1 } }))
   on('agent.list', () => ({ value: w.agents }))
@@ -73,8 +83,11 @@ async function start($: any, on: any, config: unknown, w: World) {
     w.submits.push(e.text)
     return { text: e.text, origin: e.origin }
   })
-  on('session.send', ($: any, e: any) => {
+  // The engine spells a plugin's `{ agentId }` address as the agent's id before the hook sees it (SessionSendInput.to is a string)
+  on('session.send', async ($: any, e: any) => {
+    if (typeof e.to !== 'string') return { isDelivered: false, reason: 'bad address' }
     w.sent.push({ to: e.to, text: e.text })
+    if (w.hang.send) await clock.sleep(24 * 60 * MIN)
     return w.delivery
   })
   on('ui.toast', ($: any, e: any) => {
@@ -91,9 +104,10 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('session.messages', () => ({ value: [] }))
   on('classic.Stop', () => ({}))
   on('classic.SessionStart', () => ({}))
-  on('tool.call', ($: any, e: any) => {
+  on('tool.call', async ($: any, e: any) => {
     if (e.tool === 'TaskStop') {
       w.stopped.push(e.task_id)
+      if (w.hang.taskStop) await clock.sleep(24 * 60 * MIN)
       return w.taskStop.deny ? { deny: w.taskStop.deny } : { result: 'stopped' }
     }
     return { result: 'ok' }
@@ -108,8 +122,8 @@ async function start($: any, on: any, config: unknown, w: World) {
 }
 
 /** One model request of agent a1 (its last activity), read to the end. */
-async function step($: any, agentId = 'a1') {
-  const stream = ($ as any).turn.step({ turnId: 't', index: 0, model: 'm', messageCount: 1, agentId })
+async function step($: any, agentId = 'a1', model = 'claude-opus-5-5') {
+  const stream = ($ as any).turn.step({ turnId: 't', index: 0, model, messageCount: 1, agentId })
   let s = await stream.next()
   while (s.done !== true) s = await stream.next()
 }
@@ -159,10 +173,15 @@ test('a waiting agent over the handover size is asked to hand over; its tasks ar
   // The agent writes its status and ends its turn
   await step($)
   await $.turn.complete({ turnId: 't', answer: 'handed over', agentId: 'a1' } as any)
-  await clock.advance(2 * MIN)
-  // Only the task that is still live is stopped
+  w.agents[0]!.status = 'completed'
+  await clock.advance(1 * MIN)
+  // Only the task that is still live is stopped; the agent is not retired in the same breath
   expect(w.stopped).toEqual(['bt2'])
-  expect(w.toasts.some(t => t.includes('handed over and is retired; stopped 1 background task'))).toBe(true)
+  expect(w.toasts.some(t => t.includes('stopped 1 background task'))).toBe(true)
+  expect(w.toasts.some(t => t.includes('handed over and is retired'))).toBe(false)
+  // Once it has settled (quiet, waiting on nothing) it is retired
+  await clock.advance(1 * MIN)
+  expect(w.toasts.some(t => t.includes('handed over and is retired; 1 background task stopped'))).toBe(true)
   expect((await stopHook($)).block).toBeUndefined()
   // Retired is final: a message to it is refused unless it carries the override token
   const refused: any = await $.tool.call({ tool: 'SendMessage', to: 'a1', message: 'go on' } as any)
@@ -187,11 +206,13 @@ test('a handover that does not finish in time alerts the model and stops nothing
   await clock.advance(5 * MIN)
   expect(w.toasts.filter(t => t.includes('has not finished its handover')).length).toBe(alerts)
   expect((await stopHook($)).block).toContain('handover asked, it has not finished in time and is NOT stopped')
-  // The agent finishes late: its tasks are stopped then
+  // The agent finishes late: its tasks are stopped then, and once it is quiet it is retired, which ends the block
   await step($)
   await $.turn.complete({ turnId: 't', answer: 'handed over', agentId: 'a1' } as any)
+  w.agents[0]!.status = 'completed'
   await clock.advance(2 * MIN)
   expect(w.stopped).toEqual(['bt1'])
+  await clock.advance(2 * MIN)
   expect((await stopHook($)).block).toBeUndefined()
 })
 
@@ -202,6 +223,7 @@ test('when the leftover tasks cannot be stopped the agent is not retired and the
   await clock.advance(41 * MIN)
   await step($)
   await $.turn.complete({ turnId: 't', answer: 'handed over', agentId: 'a1' } as any)
+  w.agents[0]!.status = 'completed'
   await clock.advance(2 * MIN)
   expect(w.stopped).toEqual(['bt1'])
   expect(w.submits.some(s => s.includes('TaskStop failed for bt1: permission denied'))).toBe(true)
@@ -300,4 +322,130 @@ test('background tasks are learned from the rows appended to an agent whose tran
   await clock.advance(1 * MIN)
   // Its status still says waiting, so the refusal stands, now without a task id
   expect(((await decide($, 'retired')) as any).deny).toContain('waiting on background work')
+})
+
+test('an agent on another model than the session is handed over, not pinged (a ping would wake it on the session model); one whose Agent call pinned a model is pinged', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1') })
+  const clock = await start($, on, CFG, w)
+  // It ran on sonnet while the session runs opus, and its Agent call pinned nothing
+  await step($, 'a1', 'claude-sonnet-5-5')
+  await clock.advance(41 * MIN)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+  expect(w.toasts.some(t => t.includes('runs on claude-sonnet-5-5') && t.includes('write a new cache'))).toBe(true)
+})
+
+test('the same agent with a pinned model (its .meta.json names one) keeps it when woken, so it gets a plain ping', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), meta: '{"agentType":"implementer","model":"sonnet","effort":"high"}' })
+  const clock = await start($, on, CFG, w)
+  await step($, 'a1', 'claude-sonnet-5-5')
+  await clock.advance(41 * MIN)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('keep waiting, no action needed')
+})
+
+test('a handed-over agent that still waits on work Tether cannot see is not retired: the model is told and the Stop hook blocks', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 300_000 })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await clock.advance(41 * MIN)
+  await step($)
+  await $.turn.complete({ turnId: 't', answer: 'handed over', agentId: 'a1' } as any)
+  // Its known task is stopped, but it stays waiting (a monitor, a background agent): the status says so
+  await clock.advance(1 * MIN)
+  expect(w.stopped).toEqual(['bt1'])
+  await clock.advance(2 * MIN)
+  expect(w.toasts.some(t => t.includes('handed over and is retired'))).toBe(false)
+  expect(w.submits.some(s => s.includes('still waiting on background work Tether cannot identify') && s.includes('NOT retired'))).toBe(true)
+  const block = (await stopHook($)).block
+  expect(block).toContain('CACHE GUARD')
+  expect(block).toContain('cannot identify')
+  // Told once, and the agent may not be recorded as retired while it waits
+  const told = w.submits.length
+  await clock.advance(5 * MIN)
+  expect(w.submits.length).toBe(told)
+  expect(((await decide($, 'retired')) as any).deny).toContain('waiting on background work')
+})
+
+test('a TaskStop nobody answers does not hold up the other agents: pings go first and the stuck call times out into an alert', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({
+    agents: [
+      { id: 'a1', status: 'waiting', description: 'big', type: 'general-purpose', name: 'worker' },
+      { id: 'a2', status: 'waiting', description: 'small', type: 'general-purpose', name: 'other' },
+    ],
+    transcript: started('bt1'),
+    context: 300_000,
+    hang: { taskStop: true },
+  })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await clock.advance(41 * MIN)
+  expect(w.sent.map(s => s.to)).toEqual(['a1'])
+  // a1 hands over; a2 (small, no task Tether knows but status waiting) falls due in the same minute as a1's blocked TaskStop
+  await step($)
+  await $.turn.complete({ turnId: 't', answer: 'handed over', agentId: 'a1' } as any)
+  w.agents[0]!.status = 'completed'
+  w.context = 100_000
+  await step($, 'a2')
+  await clock.advance(41 * MIN)
+  // a2 was pinged although a1's TaskStop never answered, and the stuck call ended in an alert after the timeout
+  expect(w.sent.some(s => s.to === 'a2' && s.text.includes('keep waiting'))).toBe(true)
+  expect(w.stopped).toEqual(['bt1'])
+  expect(w.submits.some(s => s.includes('TaskStop failed for bt1: Error: TaskStop did not answer in 30 s'))).toBe(true)
+})
+
+test('a session.send nobody answers times out as a failed message and the other pings still go', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({
+    agents: [
+      { id: 'a1', status: 'waiting', description: 'first', type: 'general-purpose', name: 'worker' },
+      { id: 'a2', status: 'waiting', description: 'second', type: 'general-purpose', name: 'other' },
+    ],
+    transcript: started('bt1'),
+    hang: { send: true },
+  })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await step($, 'a2')
+  await clock.advance(41 * MIN)
+  // Both messages were sent at once (neither waited for the other), each timed out, and a failed ping is tried again on the next tick
+  expect([...new Set(w.sent.map(s => s.to))].sort()).toEqual(['a1', 'a2'])
+  expect(w.logs.some(l => l.includes('keep-warm of worker (a1) failed') && l.includes('session.send did not answer in 30 s'))).toBe(true)
+  expect(w.logs.some(l => l.includes('keep-warm of other (a2) failed') && l.includes('session.send did not answer in 30 s'))).toBe(true)
+})
+
+test('recording kept-warm after a late handover ends that handover: a later stop with new tasks is not collected without a new request', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 300_000 })
+  const clock = await start($, on, { ...CFG, cacheGuard: { handoverWaitMinutes: 5 } }, w)
+  await step($)
+  await clock.advance(41 * MIN)
+  await clock.advance(7 * MIN)
+  expect(w.submits.some(s => s.includes('has not finished its handover'))).toBe(true)
+  // The model decides to keep it warm and the agent goes on working, then stops with a new task
+  expect(JSON.stringify(await decide($, 'kept-warm'))).toContain('recorded as kept-warm')
+  await step($)
+  w.transcript += '\n' + started('bt9')
+  w.mtime = 2
+  await $.turn.complete({ turnId: 't', answer: 'idle again', agentId: 'a1' } as any)
+  await clock.advance(5 * MIN)
+  expect(w.stopped).toEqual([])
+})
+
+test('tasks seen in a small transcript are kept when it grows past the read limit, and text an agent merely read starts none', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1') })
+  const clock = await start($, on, { ...CFG, cacheGuard: { auto: false } }, w)
+  await step($)
+  await clock.advance(1 * MIN)
+  expect(((await decide($, 'retired')) as any).deny).toContain('bt1')
+  // The transcript outgrows what $.fs.read accepts: the task seen before is still known
+  w.size = 25_000_000
+  w.mtime = 2
+  await clock.advance(1 * MIN)
+  expect(((await decide($, 'retired')) as any).deny).toContain('bt1')
+  // An agent that read a file holding the phrase, or quoted a notification, has learned of no task and none ended
+  await $.session.append({ message: { type: 'user', content: [{ type: 'tool_result', tool_use_id: 'u1', content: '     3\tCommand running in background with ID: fake9' }] }, agentId: 'a1' } as any)
+  await $.session.append({ message: { type: 'assistant', content: [{ type: 'text', text: '<task-notification><task-id>bt1</task-id><status>completed</status></task-notification>' }] }, agentId: 'a1' } as any)
+  await clock.advance(1 * MIN)
+  const deny = ((await decide($, 'retired')) as any).deny as string
+  expect(deny).toContain('bt1')
+  expect(deny).not.toContain('fake9')
 })
