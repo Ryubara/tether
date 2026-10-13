@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0-alpha.3
+
+- **Checkpoint cycle** (off by default: `"checkpoint": { "enabled": true }`). When the main session's context
+  reaches `contextTokens` and it has been quiet for `quietSeconds` (no turn, no draft), it asks for the handoff
+  file, checks it against the template (the required headings and `maxChars`), repairs it up to `maxRepairs`
+  times, updates it if messages arrived meanwhile, then runs `/clear` and continues from the handoff. It never
+  clears over a handoff that fails its check, and a clear that does not happen is reported.
+- The continue prompt is kept in `$.store` until the new session starts, so a reload cannot lose it.
+
 ## 1.0.0-alpha.2
 
 - A services row opens the pane: `✅ Fleet` green when on, `❌ Watch` dimmed when off.

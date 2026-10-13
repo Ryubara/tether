@@ -16,6 +16,9 @@ import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type Poller, type WatchConfig } from '../src/watch/config'
 import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type WatchState as WatchStateData } from '../src/watch/boxes'
 import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
+import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
+import { handoffProblems } from '../src/checkpoint/handoff'
+import { askText, continueText, initialCycle, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 
 // ---- FLEET ----
 // fleet: see the session's agents and what they cost, and refuse waking a big agent on a cold cache.
@@ -102,7 +105,7 @@ async function readTetherFile($: any): Promise<{ root?: Record<string, unknown>;
 
 /** Reads the fleet section of the config, falling back to the defaults on any problem. */
 async function loadConfig($: any): Promise<FleetConfig> {
-  const { root, problem } = await readTetherConfig($)
+  const { root, problem } = await readTetherConfig($, true)
   if (problem) $.ui.log(`fleet: ${problem}; using the defaults`)
   return root ? mergeConfig(root.fleet ?? {}) : DEFAULTS
 }
@@ -773,11 +776,112 @@ const registerWatch: Register = (on, options) => {
 
 // ---- both parts ----
 
+// ---- CHECKPOINT ----
+// The checkpoint cycle (src/checkpoint): when the session is long and quiet, ask for a handoff, check it,
+// then clear and continue from it. The decisions are pure (src/checkpoint/cycle.ts); this part reads the
+// session and carries them out. The continue prompt waits in $.store, so a reload between the clear and
+// the continue cannot lose it.
+
+const CHECKPOINT_CONTINUE_KEY = 'checkpoint:continue'
+let cpCfg: CheckpointConfig = CHECKPOINT_DEFAULTS
+let cpState: CycleState = initialCycle()
+let cpTimers: Array<{ cancel: () => void }> = []
+/** One tick at a time: a tick awaits the prompt and the clear, and the next must not start meanwhile. */
+let cpTicking = false
+
+/** Reads the checkpoint section of the config and starts the tick. */
+async function checkpointStart($: any): Promise<void> {
+  const { root } = await readTetherConfig($, true)
+  cpCfg = mergeCheckpoint(root?.checkpoint ?? {})
+  for (const t of cpTimers) t.cancel()
+  cpTimers = cpCfg.enabled ? [$.clock.every(cpCfg.tickSeconds * 1000, () => checkpointTick($)) as any] : []
+}
+
+/** One tick: read the session's state, step the cycle, and carry out what it decides. */
+async function checkpointTick($: any): Promise<void> {
+  if (!cpCfg.enabled || cpTicking) return
+  cpTicking = true
+  try {
+    const now = await $.clock.now()
+    // A draft is the person typing: it holds the cycle as a wake does (only the main loop's turns count as busy)
+    const draft = busy ? '' : ((await $.prompt.read())?.text ?? '')
+    const contextTokens = ledger.get('main')?.contextTokens ?? 0
+    // Messages and the handoff are read only once a handoff is in progress; an idle session needs neither
+    const inProgress = cpState.phase !== 'idle'
+    const messages = inProgress ? ((await $.session.messages()) as unknown[]).length : 0
+    const problems = inProgress ? await handoffCheck($) : []
+    const observed: Observed = { now, contextTokens, busy, draft, messages, problems }
+    const { state, action } = cycleStep(cpState, observed, cpCfg)
+    cpState = state
+    await carryOut($, action, problems)
+  } finally {
+    cpTicking = false
+  }
+}
+
+/** The handoff's problems now: undefined when the file is missing, else the template check's list. */
+async function handoffCheck($: any): Promise<string[] | undefined> {
+  try {
+    if (!(await $.fs.exists(cpCfg.handoffFile))) return undefined
+    return handoffProblems(await $.fs.read(cpCfg.handoffFile), cpCfg)
+  } catch {
+    return undefined
+  }
+}
+
+/** Carries out one action of the cycle: a prompt to the model, or the clear. */
+async function carryOut($: any, action: Action, problems: string[] | undefined): Promise<void> {
+  if (action === 'none') return
+  if (action === 'ask' || action === 'update') {
+    $.ui.log(`checkpoint: ${action === 'ask' ? 'asking for' : 'updating'} ${cpCfg.handoffFile}`)
+    await $.prompt.submit({ text: askText(cpCfg, action === 'update') })
+    return
+  }
+  if (action === 'repair') {
+    await $.prompt.submit({ text: repairText(cpCfg, problems ?? [`${cpCfg.handoffFile} is missing`]) })
+    return
+  }
+  if (action === 'give-up') {
+    $.ui.toast(`checkpoint: ${cpCfg.handoffFile} failed its check; not cleared`)
+    $.ui.log(`checkpoint: gave up; ${cpCfg.handoffFile} never passed its check`)
+    return
+  }
+  // clear: remember the continue first, so a reload between here and the new session cannot lose it
+  await $.store.set(CHECKPOINT_CONTINUE_KEY, true)
+  try {
+    await $.command.run({ command: 'clear' })
+  } catch (err) {
+    $.ui.log(`checkpoint: the clear failed: ${err}`)
+  }
+  // The new session's start normally clears the flag before this returns; a flag still set means no clear happened
+  if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) === true) {
+    await $.store.set(CHECKPOINT_CONTINUE_KEY, false)
+    cpState = initialCycle()
+    $.ui.toast('checkpoint: the clear did not happen')
+  }
+}
+
+/** After a clear, the new session continues from the handoff (after a second, so the session has settled). */
+async function checkpointAfterClear($: any): Promise<void> {
+  if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) !== true) return
+  await $.store.set(CHECKPOINT_CONTINUE_KEY, false)
+  cpState = initialCycle()
+  $.clock.after(1000, () => $.prompt.submit({ text: continueText(cpCfg) }))
+}
+
 export const register: Register = (on, options) => {
   registerFleet(on, options)
   registerWatch(on, options)
 
-  on('session.start', async ($, e, next) => fleetStart($, e, (e2: any) => watchStart($, e2, next)))
+  on('session.start', async ($, e, next) => {
+    await checkpointStart($)
+    return fleetStart($, e, (e2: any) => watchStart($, e2, next))
+  })
+  // A clear starts a new session: continue from the handoff if a checkpoint asked for it
+  on('classic.SessionStart', async ($, e, next) => {
+    if ((e as any).source === 'clear') await checkpointAfterClear($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
   on('turn.complete', async ($, e, next) => fleetComplete($, e, (e2: any) => watchComplete($, e2, next)))
   on('turn.step', async function* ($, e, next) {
     return yield* fleetStep($, e, (e2: any) => watchStep($, e2, next))

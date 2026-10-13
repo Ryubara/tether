@@ -21,6 +21,12 @@ run inside Claude Code (version 2.1.287 or later). See the
   `❌ Watch` dimmed when it is off. A service is off when its section sets `"enabled": false`; it then runs
   nothing (no polls, no refresh, no guard, no status text).
 
+- **Checkpoint.** Off by default. Turn it on with `"checkpoint": { "enabled": true }`. When the session's
+  context reaches `contextTokens` (default 200000) and has been quiet for `quietSeconds` (default 90), it asks
+  the model to write the handoff file (`HANDOFF.md` by default), checks it (the headings in `sections` and the
+  `maxChars` limit), repairs it up to `maxRepairs` times, then runs `/clear` and continues from it. It never
+  clears over a handoff that fails its check. Nothing is cleared while you are typing or a turn is running.
+
 ## Install
 
 ```

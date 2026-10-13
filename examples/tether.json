@@ -7,6 +7,15 @@
     "columnTint": true,
     "refreshSeconds": 15
   },
+  "checkpoint": {
+    "enabled": false,
+    "contextTokens": 200000,
+    "quietSeconds": 90,
+    "handoffFile": "HANDOFF.md",
+    "maxChars": 9500,
+    "sections": ["## Where to look", "## Summary", "## Next steps", "## Open questions"],
+    "maxRepairs": 3
+  },
   "watch": {
     "tickSeconds": 1,
     "boxRows": 6,
