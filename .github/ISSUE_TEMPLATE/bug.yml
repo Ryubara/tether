@@ -1,0 +1,42 @@
+# Generated from .github/conventions.yml by `groundwork.py render`; edit the conventions, not this file.
+name: Bug
+description: Something is broken
+title: 'Bug: '
+labels:
+- bug
+- S-needs-triage
+body:
+- type: textarea
+  id: version
+  attributes:
+    label: Tether version
+  validations:
+    required: true
+- type: textarea
+  id: claude
+  attributes:
+    label: Claude Code version
+  validations:
+    required: true
+- type: textarea
+  id: steps
+  attributes:
+    label: Steps to reproduce
+  validations:
+    required: true
+- type: textarea
+  id: expected
+  attributes:
+    label: What you expected
+  validations:
+    required: true
+- type: textarea
+  id: actual
+  attributes:
+    label: What happens
+  validations:
+    required: true
+- type: textarea
+  id: log
+  attributes:
+    label: Log

@@ -1,0 +1,161 @@
+# The rules for running this repository: commits, pull requests, issues, labels, merging and hygiene. This file is the
+# one source of truth for every rule a program can check. .github/scripts/groundwork.py reads it and refuses an
+# unknown key or a wrong type. The pull request template and the issue forms are generated from it
+# (`groundwork.py render`), the labels, merge settings and branch ruleset are applied from it (`labels`, `settings`,
+# `ruleset`), and `groundwork.py check` reports any drift. Change a rule here, then render and apply.
+# YAML traps: quote a colour made only of digits ("000000") and any text YAML could read as a number or a boolean.
+version: 1
+
+repo:
+  default_branch: main
+  # What an issue or a pull request calls the person who directs the project.
+  wording: {person: user, avoid: [owner]}
+  # Decisions only a maintainer makes: an agent stops and reports instead of acting.
+  maintainer_decisions:
+    - make the repository public
+    - tag a release
+    - force-push the default branch or someone else's branch
+    - legal or licence questions
+    - change these conventions
+
+paths:
+  # A change under `code` needs a change under `docs` (the living doc moves with the code) or a `Docs: none` line.
+  code: ["src/", "hooks/"]
+  docs: ["docs/", "examples/", "README.md", "CHANGELOG.md"]
+
+commits:
+  title:
+    form: "area: Verb the rest"
+    max_length: 72
+    trailing_period: false
+    breaking_suffix: "(BREAKING)"
+    areas:
+      checkpoint: "the checkpoint cycle: handoff, clear and continue (src/checkpoint)"
+      fleet: "the agent fleet pane, the cache guard and annotations (src/fleet)"
+      watch: "pollers, findings and the watch boxes (src/watch)"
+      guards: "the PR guard, the agent guard and the Stop hook (src/guards)"
+      housekeeping: "the project's folder, ignore entries and the handoff template (src/housekeeping)"
+      conversation: "conversation logs (src/conversation)"
+      plugin: "the manifest, hooks registration and options (.claude-plugin, hooks)"
+      build: "dependencies and the plugin's build and release plumbing"
+      ci: "GitHub Actions workflows and repository settings"
+      tests: "test-only changes"
+      docs: "README, changelog, examples and other documentation"
+      agents: "agent instructions (AGENTS.md, CLAUDE.md)"
+    verbs: [Add, Fix, Update, Remove, Rebuild, Rework, Improve, Document]
+
+pull_requests:
+  template: .github/pull_request_template.md
+  # `##` headings of the description, in the template's order; the squash commit takes the pull request's title.
+  sections: [Summary, Checklist, Testing, AI use]
+  filled: [Summary, Testing]                     # must hold text of their own, not just a comment or a placeholder
+  placeholders: ["...", "<reason>"]              # template text that counts as empty when left unchanged
+  local_paths: false                             # no scratch/, ../../ or C:\ in the text (images are the exception)
+  docs_none: {line: "Docs: none", when_changed: code, unless_changed: docs}
+  closing: {keyword: "Fixes", form: "Fixes #N", one_per_line: true, section: Summary}
+  # Every task a pull request lists is finished: an unticked `- [ ]` item is refused. Work it does not finish lives in
+  # its own issue.
+  checklist: {section: Checklist, unchecked: refused}
+  ai_use:
+    section: "AI use"
+    written_by:
+      label: "Commits written by:"
+      choices: ["a person", "an AI", "an AI, edited by a person", "a person, with AI help"]
+      no_ai: "a person"
+    model: {label: "Model:", none: "n/a"}
+  guidance:
+    Summary: "One short paragraph: what this changes and why. If the change needs no documentation, add a line `Docs: none`. If this finishes an issue, add a line `Fixes #<number>` (one per issue)."
+    Checklist: "List what this pull request finishes, each item ticked. Work it does not finish is not listed here: it lives in its own issue."
+    Testing: "What was run and what came out: commands, tests added or changed, results as counts or pass/fail."
+    "AI use": "Who wrote the work in this pull request's commits, not who opened the pull request."
+
+merge:
+  # Mirrors the GitHub ruleset and the repository settings (`groundwork.py ruleset`, `settings`).
+  methods: [squash]
+  squash_title: PR_TITLE
+  squash_message: PR_BODY                        # the description, so its Co-Authored-By trailers stay
+  auto_merge: true
+  delete_branch_on_merge: true
+  linear_history: true
+  required_checks: [title, body, docs, build-ok]
+
+issues:
+  blank_issues: false
+  placeholders: ["x", "xx", "xxx", "tbd", "todo", "wip", "...", "n/a", "na", "?"]
+  forms:
+    bug:
+      name: Bug
+      description: Something is broken
+      file: .github/ISSUE_TEMPLATE/bug.yml
+      title_prefix: "Bug: "
+      labels: [bug, S-needs-triage]
+      sections:
+        version: ["Tether version", true]
+        claude: ["Claude Code version", true]
+        steps: ["Steps to reproduce", true]
+        expected: ["What you expected", true]
+        actual: ["What happens", true]
+        log: ["Log", false]
+    task:
+      name: Task
+      description: A piece of work for a maintainer or an agent
+      file: .github/ISSUE_TEMPLATE/task.yml
+      title_prefix: "Task: "
+      labels: [task, S-needs-triage]
+      intro: "A task is written so that someone with no other context can do it: start with the problem."
+      sections:
+        summary: ["Summary", true]
+        area: {heading: "Area", required: true, type: dropdown, description: "The part of Tether; the maintainer sets the matching label.", options: [A-checkpoint, A-fleet, A-watch, A-guards, A-housekeeping, A-conversation, A-plugin]}
+        done: ["What \"done\" means", true]
+        steps: ["Fix list or steps", false]
+        blocked-by: ["Blocked by", false]
+  # How many of each label family an open issue carries.
+  labels:
+    type: exactly-one
+    area: at-least-one
+    status: exactly-one
+
+labels:
+  description_max: 100                           # GitHub's limit
+  # A label belongs to the family named by its prefix; `type` has no prefix and lists its names.
+  families:
+    type: {prefix: "", names: [bug, task, docs, enhancement]}
+    area: {prefix: "A-"}
+    priority: {prefix: "P-"}
+    status: {prefix: "S-"}
+  list:
+    - {name: bug, color: d73a4a, description: "Something is broken"}
+    - {name: task, color: 0e8a16, description: "A piece of work for a maintainer or an agent"}
+    - {name: docs, color: 0075ca, description: "Documentation"}
+    - {name: enhancement, color: a2eeef, description: "A new feature or an improvement"}
+    - {name: A-checkpoint, color: c5def5, description: "Area: checkpoint"}
+    - {name: A-fleet, color: c5def5, description: "Area: fleet"}
+    - {name: A-watch, color: c5def5, description: "Area: watch"}
+    - {name: A-guards, color: c5def5, description: "Area: guards"}
+    - {name: A-housekeeping, color: c5def5, description: "Area: housekeeping"}
+    - {name: A-conversation, color: c5def5, description: "Area: conversation"}
+    - {name: A-plugin, color: c5def5, description: "Area: plugin"}
+    - {name: P-high, color: e11d21, description: "Priority: blocks other work"}
+    - {name: P-medium, color: fbca04, description: "Priority: next in line"}
+    - {name: P-low, color: 0e8a16, description: "Priority: when there is room"}
+    - {name: S-needs-triage, color: ededed, description: "Status: not yet looked at"}
+    - {name: S-ready-to-start, color: 0e8a16, description: "Status: triaged and accepted; waiting for someone"}
+    - {name: S-needs-info, color: d4c5f9, description: "Status: waiting for the reporter"}
+    - {name: S-in-progress, color: 5319e7, description: "Status: someone is working on it"}
+    - {name: S-pending-review, color: 1d76db, description: "Status: a pull request is open"}
+    - {name: S-blocked, color: "000000", description: "Status: waiting for another issue or a decision"}
+    - {name: good first issue, color: 7057ff, description: "Good for newcomers"}
+    - {name: help wanted, color: "008672", description: "Extra attention is needed"}
+    - {name: duplicate, color: cfd3d7, description: "This already exists"}
+    - {name: wontfix, color: ffffff, description: "This will not be worked on"}
+
+hygiene:
+  report_issue:
+    title: "Repo hygiene"
+    labels: [task, P-low, S-in-progress]
+  sweep: "0 6 * * 1"                             # weekly, Monday 06:00 UTC; must equal the cron in hygiene.yml
+  thresholds:
+    needs_triage_days: 7
+    needs_info_days: 21
+    in_progress_idle_days: 30
+    pull_request_idle_days: 30

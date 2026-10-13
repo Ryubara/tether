@@ -1,0 +1,52 @@
+# Keeps an issue's status label true to its state: a closed issue carries no `S-` label (a status describes open
+# work and the close reason is the final state); a reopened issue gets `S-needs-triage` so it is looked at again. The
+# token is limited to `issues: write`, nothing is checked out and no code from the repository runs. The issue number
+# and the action reach the script only through environment variables, and a label name read back from GitHub is
+# matched against a strict pattern before it is used.
+name: issue-status
+
+on:
+  issues:
+    types: [closed, reopened]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  status-label:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Remove the status labels of a closed issue, or add S-needs-triage to a reopened one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+          ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          [[ "$NUMBER" =~ ^[0-9]+$ ]] || { echo "unexpected issue number" >&2; exit 1; }
+          mapfile -t status < <(gh api "repos/$REPO/issues/$NUMBER/labels" --paginate --jq '.[].name | select(startswith("S-"))')
+          case "$ACTION" in
+            closed)
+              for label in "${status[@]}"; do
+                [[ "$label" =~ ^S-[A-Za-z0-9-]+$ ]] || { echo "skipping unexpected label name" >&2; continue; }
+                gh api --method DELETE "repos/$REPO/issues/$NUMBER/labels/$label" --silent
+                echo "removed $label from #$NUMBER"
+              done
+              ;;
+            reopened)
+              if [ "${#status[@]}" -eq 0 ]; then
+                gh api --method POST "repos/$REPO/issues/$NUMBER/labels" -f 'labels[]=S-needs-triage' --silent
+                echo "added S-needs-triage to #$NUMBER"
+              fi
+              ;;
+            *)
+              echo "unexpected action" >&2
+              exit 1
+              ;;
+          esac
