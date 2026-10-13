@@ -45,7 +45,10 @@ export type AgentsPoller = {
   everySeconds: number
   /** A running agent with no model request for this long is a finding (once per silence). */
   silentMinutes: number
-  /** An agent whose context reaches this is a finding (once). */
+  /**
+   * An agent whose context reaches this is a finding (once). Unset in the file, it is the subagent max context
+   * (`fleet.retireContextTokens`), so one setting decides both the pane's retire flag and this wake.
+   */
   contextTokens: number
   /** Also count agents `waiting` on their own background work as silent (off: that wait is normal). */
   includeWaiting: boolean
@@ -156,8 +159,11 @@ function regex(v: unknown, where: string, problems: string[]): string | undefine
   }
 }
 
-/** Reads one poller entry; undefined (with a problem noted) when it cannot be used. */
-function poller(raw: unknown, i: number, problems: string[]): Poller | undefined {
+/** The context an agents poller wakes at when nothing sets one: fleet's default subagent max context. */
+export const DEFAULT_AGENT_CONTEXT_TOKENS = 300_000
+
+/** Reads one poller entry; undefined (with a problem noted) when it cannot be used. `agentContextTokens` is what an agents poller without its own `contextTokens` uses. */
+function poller(raw: unknown, i: number, problems: string[], agentContextTokens: number): Poller | undefined {
   if (raw === null || typeof raw !== 'object') {
     problems.push(`pollers[${i}]: not an object`)
     return undefined
@@ -182,7 +188,7 @@ function poller(raw: unknown, i: number, problems: string[]): Poller | undefined
       ...common,
       everySeconds: num(r.everySeconds, 60),
       silentMinutes: num(r.silentMinutes, 20),
-      contextTokens: num(r.contextTokens, 300_000),
+      contextTokens: num(r.contextTokens, agentContextTokens),
       includeWaiting: r.includeWaiting === true,
     }
   }
@@ -236,8 +242,12 @@ function poller(raw: unknown, i: number, problems: string[]): Poller | undefined
   }
 }
 
-/** Merges a parsed config file over the defaults; `problems` lists what was left out and why. */
-export function parseConfig(raw: unknown): { config: WatchConfig; problems: string[] } {
+/**
+ * Merges a parsed config file over the defaults; `problems` lists what was left out and why. `agentContextTokens` is
+ * the effective subagent max context (`fleet.retireContextTokens`, from the option or the file): an agents poller
+ * that sets no `contextTokens` of its own wakes at it.
+ */
+export function parseConfig(raw: unknown, agentContextTokens = DEFAULT_AGENT_CONTEXT_TOKENS): { config: WatchConfig; problems: string[] } {
   const problems: string[] = []
   const config: WatchConfig = { ...DEFAULTS, pollers: [], pane: {} }
   if (raw === null || typeof raw !== 'object') return { config, problems: ['the config is not a JSON object'] }
@@ -257,7 +267,7 @@ export function parseConfig(raw: unknown): { config: WatchConfig; problems: stri
   const list = Array.isArray(r.pollers) ? r.pollers : []
   const ids = new Set<string>()
   list.forEach((p, i) => {
-    const one = poller(p, i, problems)
+    const one = poller(p, i, problems, agentContextTokens)
     if (!one) return
     if (ids.has(one.id)) {
       problems.push(`${one.id}: duplicate id, the later one is ignored`)

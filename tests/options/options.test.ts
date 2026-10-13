@@ -6,7 +6,7 @@ import { DEFAULTS as FLEET_DEFAULTS, mergeConfig } from '../../src/fleet/config'
 import { CACHE_GUARD_DEFAULTS, mergeCacheGuard } from '../../src/guards/config'
 import { CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, mergeConversations, mergeHousekeeping, mergeStop } from '../../src/housekeeping/config'
 import { OPTIONS, PANES, fromOptions, layered } from '../../src/options/options'
-import { DEFAULTS as WATCH_DEFAULTS, parseConfig } from '../../src/watch/config'
+import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type AgentsPoller } from '../../src/watch/config'
 
 /** The options as Claude Code hands them over when nobody has changed anything: every default. */
 const defaults = Object.fromEntries([...OPTIONS, ...PANES].map(e => [e.option, e.default]))
@@ -89,4 +89,18 @@ test('the plugin reads its options: an off switch reaches the pane (here, no emo
 
 test('without that option the pane draws its emoji', { timeoutMs: 30_000, options: { fleetEmoji: true } }, async ($, on) => {
   expect(await fleetText($, on)).toContain('⏳')
+})
+
+test('the subagent max context is one option and one fleet field, and the agents poller follows it', async () => {
+  const entry = OPTIONS.find(e => e.option === 'fleetRetireContextTokens')!
+  expect([entry.section, entry.field, entry.default, entry.title]).toEqual(['fleet', 'retireContextTokens', 300_000, 'Subagent max context (tokens)'])
+  expect(entry.description).toMatch(/agents poller/)
+  // The way the plugin wires it: the effective fleet value, from the option or the file, is the poller's fallback
+  const wired = (o: Record<string, unknown>, file: { fleet?: unknown; watch?: unknown }) =>
+    (parseConfig(layered(o, 'watch', file.watch), mergeConfig(layered(o, 'fleet', file.fleet)).retireContextTokens).config.pollers[0] as AgentsPoller).contextTokens
+  const watch = { pollers: [{ id: 'agents', kind: 'agents' }] }
+  expect(wired(defaults, { watch })).toBe(300_000)
+  expect(wired({ ...defaults, fleetRetireContextTokens: 180_000 }, { watch })).toBe(180_000)
+  expect(wired(defaults, { watch, fleet: { retireContextTokens: 220_000 } })).toBe(220_000)
+  expect(wired({ ...defaults, fleetRetireContextTokens: 180_000 }, { watch: { pollers: [{ id: 'agents', kind: 'agents', contextTokens: 90_000 }] } })).toBe(90_000)
 })

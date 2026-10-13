@@ -115,3 +115,21 @@ test('enabled defaults on and turns watch off', async () => {
   expect(parseConfig({ enabled: false }).config.enabled).toBe(false)
   expect(parseConfig({ enabled: 'no' }).config.enabled).toBe(true)
 })
+
+test('an agents poller without contextTokens wakes at the subagent max context; its own value wins', async () => {
+  const pollers = [
+    { id: 'agents', kind: 'agents' },
+    { id: 'own', kind: 'agents', contextTokens: 150_000 },
+  ]
+  // Nothing given: fleet's default size
+  const [dflt, ownDflt] = parseConfig({ pollers }).config.pollers as AgentsPoller[]
+  expect([dflt!.contextTokens, ownDflt!.contextTokens]).toEqual([300_000, 150_000])
+  // The subagent max context given: an unset poller takes it, an explicit one keeps its own
+  const [fell, own] = parseConfig({ pollers }, 200_000).config.pollers as AgentsPoller[]
+  expect([fell!.contextTokens, own!.contextTokens]).toEqual([200_000, 150_000])
+  // The finding names the size it was measured against
+  const seen = [{ id: 'a1', status: 'running', label: 'fat', lastStepAt: 99 * MIN, contextTokens: 250_000 }]
+  expect(agentFindings(fell!, seen, 100 * MIN)).toEqual([{ key: 'a1|context', text: 'fat (a1) context 250k, past 200k' }])
+  expect(agentFindings(own!, seen, 100 * MIN).map(f => f.key)).toEqual(['a1|context'])
+  expect(agentFindings(dflt!, seen, 100 * MIN)).toEqual([])
+})
