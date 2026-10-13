@@ -2,7 +2,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../../src/checkpoint/config'
-import { handoffProblems } from '../../src/checkpoint/handoff'
+import { handoffProblems, injectedHandoff } from '../../src/checkpoint/handoff'
 import { askText, clock, describeCycle, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
 
 const cfg: CheckpointConfig = { ...CHECKPOINT_DEFAULTS, enabled: true, contextTokens: 1000, quietSeconds: 10, maxRepairs: 2 }
@@ -149,4 +149,15 @@ test('the pane line counts down the quiet window, and says what waits', () => {
   expect(describeCycle(asked, obs(3000, { busy: true }), cfg)).toMatch(/turn to end/)
   expect(describeCycle(initialCycle(), obs(0, { contextTokens: 500 }), cfg)).toMatch(/due at/)
   expect(describeCycle(initialCycle(), obs(0, { contextTokens: 5000 }), { ...cfg, enabled: false })).toBe('checkpoint: off')
+})
+
+test('injectedHandoff adds a header, cuts at 400 lines with a note, and skips an empty file', async () => {
+  expect(injectedHandoff('H.md', '  \n')).toBeUndefined()
+  expect(injectedHandoff('H.md', 'a\nb\n')).toBe('Project state from the handoff file (Tether): H.md\n\na\nb')
+  const long = injectedHandoff('H.md', Array.from({ length: 450 }, (_, i) => `l${i}`).join('\n'))!
+  expect(long).toContain('l399')
+  expect(long).not.toContain('l400')
+  expect(long).toContain('H.md is 450 lines')
+  expect(mergeCheckpoint({ injectHandoff: true }).injectHandoff).toBe(true)
+  expect(CHECKPOINT_DEFAULTS.injectHandoff).toBe(false)
 })

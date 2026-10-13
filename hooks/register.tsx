@@ -18,7 +18,7 @@ import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type Polle
 import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type WatchState as WatchStateData } from '../src/watch/boxes'
 import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
-import { handoffProblems } from '../src/checkpoint/handoff'
+import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 import { stopReason as agentStopReason, undecided, type Undecided } from '../src/guards/agents'
 import { ACTIVE_RERUN, GH_FIELDS, fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
@@ -1092,6 +1092,20 @@ async function guardsStart($: any): Promise<void> {
   stopCfg = mergeStop(layered(options, 'stop', root?.stop))
 }
 
+/** The handoff as session-start context when `checkpoint.injectHandoff` is on and the file exists; undefined otherwise. */
+async function handoffContext($: any): Promise<string | undefined> {
+  try {
+    // Read again: this event may come before the session.start that loads the settings
+    const { root } = await readTetherConfig($, true)
+    const cfg = mergeCheckpoint(layered(options, 'checkpoint', root?.checkpoint))
+    if (!cfg.injectHandoff || !(await $.fs.exists(cfg.handoffFile))) return undefined
+    return injectedHandoff(cfg.handoffFile, String(await $.fs.read(cfg.handoffFile)))
+  } catch (err) {
+    $.ui.log(`checkpoint: the handoff was not added to the session: ${err}`)
+    return undefined
+  }
+}
+
 /** Adds Tether's lines to the repository's exclude file, makes a missing handoff, and reports a failing one. */
 async function housekeepingStart($: any): Promise<void> {
   if (!hkCfg.enabled) return
@@ -1212,7 +1226,9 @@ export const register: Register = (on, opts) => {
   // A clear starts a new session: continue from the handoff if a checkpoint asked for it
   on('classic.SessionStart', async ($, e, next) => {
     if ((e as any).source === 'clear') await checkpointAfterClear($)
-    return next(e)
+    const r: any = await next(e)
+    const text = await handoffContext($)
+    return text === undefined ? r : { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), text] }
   }).catch(($, e, next) => next(e))
   on('turn.complete', async ($, e, next) => {
     const r = await fleetComplete($, e, (e2: any) => watchComplete($, e2, next))
