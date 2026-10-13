@@ -74,6 +74,8 @@ export type PrsPoller = {
   /** Working directory of `gh`, `git` and the command; absent, the session's. */
   cwd?: string
   timeoutMs: number
+  /** The `command`'s exit codes that carry its JSON (a health command may exit 1 to say "something is stuck"); any other is an error. */
+  okExitCodes: number[]
   /** Built-in read: CI running this long counts as stuck. */
   stuckMinutes: number
   /** Built-in read: a PR without auto-merge is a problem. */
@@ -202,6 +204,7 @@ function poller(raw: unknown, i: number, problems: string[]): Poller | undefined
       ...(command ? { command: command as string[] } : {}),
       ...(text(r.cwd) ? { cwd: text(r.cwd) } : {}),
       timeoutMs: num(r.timeoutMs, 240_000),
+      okExitCodes: codes(r.okExitCodes, [0, 1]),
       stuckMinutes: num(r.stuckMinutes, 90),
       requireAutoMerge: r.requireAutoMerge === true,
       ignoreDrafts: r.ignoreDrafts !== false,

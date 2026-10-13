@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-alpha.13
+
+- Fixed: a `prs` poller's health command that exits 1 (as Coney's `pr-health` does whenever a PR is stuck) was
+  treated as a failed run, so the PR guard saw nothing exactly when it should. The poller has `okExitCodes`
+  (default `[0, 1]`); any other exit code is still an error.
+
 ## 1.0.0-alpha.12
 
 - **Every scalar setting is a plugin option** (`/plugin configure tether@tether`, 41 in all): the checkpoint's
