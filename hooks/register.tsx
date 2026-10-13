@@ -982,9 +982,9 @@ async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]
   }
 }
 
-/** The result of a Tether tool: one text block. */
+/** The result of a Tether tool: its text. The harness takes a string, an array or nothing, never an object. */
 function toolText(text: string): any {
-  return { result: { content: [{ type: 'text', text }] } }
+  return { result: text }
 }
 
 /** Registers the two tools the model records owners and decisions with. */

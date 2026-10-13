@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.0-alpha.11
+
+- Fix: `pr_owner` and `agent_decision` returned an object, which Claude Code refuses as a tool result ("does not
+  match its output shape"); they now return their text as a string. The record was kept, but the model saw an error.
+
 ## 1.0.0-alpha.10
 
 - **PR guard.** A poller of `kind: "prs"` reads the open pull requests (with `gh`, or with a project's own
