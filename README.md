@@ -13,6 +13,12 @@ run inside Claude Code (version 2.1.287 or later). See the
   prompt-cache minutes left, with flags that say what waking it would cost. The `SendMessage` guard refuses
   to wake a big agent whose prompt cache has expired (waking it re-writes the whole context into the cache),
   for the main agent and for subagents. `/fleet` opens the pane; `/fleet text` prints it.
+  **BIG-WAIT**: with `fleet.bigWaitTokens` set (0, the default, is off), a live agent whose context has reached
+  it and whose annotation note (`fleet.annotate`) matches `fleet.bigWaitNote` (a regular expression, matched
+  case-insensitively; empty: any note, but an agent with no note never matches) shows `BIG-WAIT` in the FLAGS
+  column, in `/fleet text` and as a count in the status line: it holds a big context while only waiting, so retire
+  it and start a small successor from its status notes. `fleet.usageWarnPercent` (the `!` after a rate limit) is
+  only shown with `fleet.showSession`, because only then does fleet read the rate limits.
 - **Watch.** Pollers that run inside the session: each finding is told once, and a model turn starts only for
   new findings, never during a turn or while you type. `/watch` only reports (it never stops polling);
   `/watch pane` shows a box per poller with its countdown and its findings; `/watch run`, `forget` and
@@ -89,10 +95,12 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `fleetCacheTtlMinutes` | `60` | How long the prompt cache lives after an agent's last request (5, or 60 with subagentPromptCacheTtl 1h). |
 | `fleetBigContextTokens` | `60000` | Context size from which an expired cache is worth guarding. |
 | `fleetRetireContextTokens` | `300000` | Context size at which an agent is flagged for retirement. |
+| `fleetBigWaitTokens` | `0` | An agent with at least this context and a matching note (see the note pattern) is flagged BIG-WAIT. 0: off. |
+| `fleetBigWaitNote` | (empty) | A regular expression matched case-insensitively against the agent's annotation note. Empty: any note. |
 | `fleetColdGuard` | `true` | Refuse SendMessage to a big agent whose cache has expired, unless the message starts with the override token. |
 | `fleetOverrideToken` | `[cache-ok]` | The text a message starts with to pass the cold-cache guard on purpose. |
 | `fleetShowSession` | `false` | Also show the main session context and the tightest rate limit in the status line. |
-| `fleetUsageWarnPercent` | `90` | A rate limit at or above this percent gets a !. |
+| `fleetUsageWarnPercent` | `90` | A rate limit at or above this percent gets a !. Only shown with Show session context. |
 | `fleetRefreshSeconds` | `15` | Seconds between refreshes of the agent list, usage and annotations. |
 | `fleetCacheWarnMinutes` | `15` | Cache minutes left at or under which the cache cell turns to the warning colour. |
 | `fleetEmoji` | `true` | An emoji per state and flag in the pane and /fleet text; off for plain text. |

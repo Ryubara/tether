@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0-alpha.16
+
+- Added: the fleet flag `BIG-WAIT`. With `fleet.bigWaitTokens` set (default 0, off) a live agent whose context has
+  reached it and whose annotation note matches the new `fleet.bigWaitNote` (regular expression, case-insensitive,
+  default any note) is flagged in the pane, in `/fleet text` and in the status line count. Both settings are
+  plugin options (43 in all). `usageWarnPercent` is documented as needing `showSession`.
+
 ## 1.0.0-alpha.15
 
 - Added: a `prs` poller reads the `rerun` list of the project health command's JSON. Every entry is told as an

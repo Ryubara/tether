@@ -5,7 +5,7 @@ import { DEFAULTS, mergeConfig } from '../../src/fleet/config'
 import { coldGuard } from '../../src/fleet/guard'
 import { recordStep, type Ledger } from '../../src/fleet/ledger'
 import { buildRows, summary, tokens } from '../../src/fleet/rows'
-import { DEFAULT_TINT, headerCells, rowCells, rowText } from '../../src/fleet/cells'
+import { DEFAULT_TINT, headerCells, legend, rowCells, rowText } from '../../src/fleet/cells'
 
 const MIN = 60_000
 const BIG = { input_tokens: 2, cache_read_input_tokens: 150_000, cache_creation_input_tokens: 2_000 }
@@ -149,4 +149,42 @@ test('enabled defaults on and turns fleet off, which also stops the cold guard',
   const ledger: Ledger = new Map()
   const cold = { ...DEFAULTS, enabled: false }
   expect(coldGuard({ to: 'a1', message: 'hi' } as any, [{ id: 'a1', status: 'waiting', description: 'x', type: 't' } as any], ledger, 0, cold, new Map())).toBeUndefined()
+})
+
+test('BIG-WAIT flags a big live agent whose note matches, only when configured', async () => {
+  const ledger: Ledger = new Map()
+  recordStep(ledger, 'big', 0, BIG, 60, 60_000)
+  recordStep(ledger, 'busy', 0, BIG, 60, 60_000)
+  recordStep(ledger, 'small', 0, { cache_read_input_tokens: 10_000 }, 60, 60_000)
+  recordStep(ledger, 'plain', 0, BIG, 60, 60_000)
+  const agents = [
+    { id: 'big', status: 'waiting', description: 'builder' },
+    { id: 'busy', status: 'running', description: 'writer' },
+    { id: 'small', status: 'waiting', description: 'tiny' },
+    { id: 'plain', status: 'waiting', description: 'no note' },
+  ]
+  const notes = { big: 'Waiting for build slot 2', busy: 'editing files', small: 'waiting for build' }
+  const flagged = (cfg: typeof DEFAULTS) => buildRows(agents, ledger, notes, 10 * MIN, cfg).filter(r => r.flags.includes('BIG-WAIT')).map(r => r.id)
+  // Off by default, whatever the notes say
+  expect(flagged(DEFAULTS)).toEqual([])
+  // On: context at the line and a note matching the pattern, case-insensitively
+  expect(flagged({ ...DEFAULTS, bigWaitTokens: 100_000, bigWaitNote: '^waiting|queue' })).toEqual(['big'])
+  // An empty pattern is any note, but an agent with no note never matches
+  expect(flagged({ ...DEFAULTS, bigWaitTokens: 100_000 }).sort()).toEqual(['big', 'busy'])
+  // A pattern that is not a regular expression matches nothing
+  expect(flagged({ ...DEFAULTS, bigWaitTokens: 100_000, bigWaitNote: '(' })).toEqual([])
+  // An ended agent is not flagged, and the summary counts the flag
+  const cfg = { ...DEFAULTS, bigWaitTokens: 100_000, bigWaitNote: 'build' }
+  const rows = buildRows([...agents, { id: 'big2', status: 'completed', description: 'old' }], ledger, { ...notes, big2: 'build' }, 10 * MIN, cfg)
+  expect(rows.filter(r => r.flags.includes('BIG-WAIT')).map(r => r.id)).toEqual(['big'])
+  expect(summary(rows, undefined, [], 0, cfg)).toContain('1 big-wait')
+})
+
+test('a BIG-WAIT flag is drawn in the FLAGS column of a row, with its legend', async () => {
+  const row = { id: 'a', label: 'builder', state: 'waiting (bg work)', contextTokens: 200_000, note: 'build slot 2', flags: ['BIG-WAIT'] }
+  const cfg = { ...DEFAULTS, emoji: false }
+  expect(rowText(row, cfg)).toContain('BIG-WAIT · build slot 2')
+  expect(legend([row], cfg)).toContain('BIG-WAIT: a big context that is only waiting')
+  expect(mergeConfig({ bigWaitTokens: 120_000, bigWaitNote: ' build ' })).toMatchObject({ bigWaitTokens: 120_000, bigWaitNote: 'build' })
+  expect(mergeConfig({ bigWaitTokens: -5 }).bigWaitTokens).toBe(0)
 })

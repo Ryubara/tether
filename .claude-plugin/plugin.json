@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.15",
+  "version": "1.0.0-alpha.16",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -89,6 +89,18 @@
       "description": "Context size at which an agent is flagged for retirement.",
       "default": 300000
     },
+    "fleetBigWaitTokens": {
+      "type": "number",
+      "title": "BIG-WAIT at (tokens)",
+      "description": "An agent with at least this context and a matching note (see the note pattern) is flagged BIG-WAIT. 0: off.",
+      "default": 0
+    },
+    "fleetBigWaitNote": {
+      "type": "string",
+      "title": "BIG-WAIT note pattern",
+      "description": "A regular expression matched case-insensitively against the agent's annotation note. Empty: any note.",
+      "default": ""
+    },
     "fleetColdGuard": {
       "type": "boolean",
       "title": "Cold-cache guard",
@@ -110,7 +122,7 @@
     "fleetUsageWarnPercent": {
       "type": "number",
       "title": "Rate limit warning (percent)",
-      "description": "A rate limit at or above this percent gets a !.",
+      "description": "A rate limit at or above this percent gets a !. Only shown with Show session context.",
       "default": 90
     },
     "fleetRefreshSeconds": {
