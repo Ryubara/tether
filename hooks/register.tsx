@@ -959,7 +959,7 @@ async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]
     let found: Problem[]
     if (p.command) {
       const r = await run(p.command, p.timeoutMs)
-      if (r.exitCode !== 0) return { error: `health command: exit ${r.exitCode}` }
+      if (!p.okExitCodes.includes(r.exitCode)) return { error: `health command: exit ${r.exitCode}` }
       found = fromHealth(JSON.parse(r.stdout), heads)
     } else {
       found = fromGh(list, { stuckMinutes: p.stuckMinutes, requireAutoMerge: p.requireAutoMerge, ignoreDrafts: p.ignoreDrafts }, now)

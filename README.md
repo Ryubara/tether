@@ -29,7 +29,9 @@ run inside Claude Code (version 2.1.287 or later). See the
 
 - **PR guard.** A `prs` poller tells each problem with an open pull request that nobody owns: a conflict, failed
   checks, CI that seems stuck, auto-merge off (opt in), or work in a worktree that was never pushed. By default it
-  reads GitHub with `gh`; `command` swaps in the project's own health command (its JSON is `{ "stuck": [...] }`).
+  reads GitHub with `gh`; `command` swaps in the project's own health command (its JSON is `{ "stuck": [...] }`). The command
+  may exit 1 to say "something is stuck": `okExitCodes` (default `[0, 1]`) lists the exit codes whose output is read;
+  any other code (or output that is not JSON) is an error shown in `/watch`, never a quiet pass.
   The model records an owner (`assign`, a few hours) or a known wait (`waive`, optionally for one cause) with the
   `mcp__tether__pr_owner` tool; an expired owner raises the problem again.
 - **Agent guard.** The agents poller also tells stopped agents with a big context that nobody has decided about

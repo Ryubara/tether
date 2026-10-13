@@ -13,6 +13,8 @@ type World = {
   logs: string[]
   /** `gh pr list` answer. */
   prs: unknown[]
+  /** What the project's health command (argv[0] `health`) prints and exits with. */
+  health?: { stdout: string; exitCode: number }
   /** The messages of the session. */
   messages: unknown[]
   agents: Array<{ id: string; status: string; description: string; type: string }>
@@ -43,6 +45,7 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('process.run', ($: any, e: any) => {
     const argv: string[] = e.argv
     if (argv[0] === 'git' && argv[1] === 'rev-parse') return { value: { stdout: '.git/info/exclude\n', stderr: '', exitCode: 0 } }
+    if (argv[0] === 'health') return { value: { stdout: w.health?.stdout ?? '{}', stderr: '', exitCode: w.health?.exitCode ?? 0 } }
     if (argv[0] === 'gh') return { value: { stdout: JSON.stringify(w.prs), stderr: '', exitCode: 0 } }
     return { value: { stdout: '', stderr: 'unexpected', exitCode: 1 } }
   })
@@ -95,6 +98,29 @@ test('a PR problem is told, blocks the Stop hook until owned, and an owner ends 
   expect(after.block).toBeUndefined()
   const report: any = await $.command.run({ command: 'guards' } as any)
   expect(report.text).toContain('owner #12: agent-7')
+})
+
+const HEALTH = { stuck: [{ number: 12, branch: 'fix-x', cause: 'conflict', detail: 'with main', who: 'author' }] }
+
+test('a health command that exits 1 with stuck JSON still yields findings; exit 2 or bad JSON is an error', { timeoutMs: 30_000 }, async ($, on) => {
+  const config = { watch: { pollers: [{ id: 'prs', kind: 'prs', everySeconds: 300, command: ['health'] }] } }
+  const w = world({ prs: CONFLICT, health: { stdout: JSON.stringify(HEALTH), exitCode: 1 } })
+  const clock = await start($, on, config, w)
+  await clock.advance(3 * SEC)
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0]).toContain('#12 fix-x')
+  const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
+  expect(stop.block).toContain('#12 fix-x')
+})
+
+test('a health command that exits 2 is an error, not a quiet pass', { timeoutMs: 30_000 }, async ($, on) => {
+  const config = { watch: { pollers: [{ id: 'prs', kind: 'prs', everySeconds: 300, command: ['health'] }] } }
+  const w = world({ prs: CONFLICT, health: { stdout: JSON.stringify(HEALTH), exitCode: 2 } })
+  const clock = await start($, on, config, w)
+  await clock.advance(3 * SEC)
+  expect(w.submits.length).toBe(0)
+  const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
+  expect(stop.block).toBeUndefined()
 })
 
 test('the Stop hook gives up after the same block maxBlocks times', { timeoutMs: 30_000 }, async ($, on) => {
