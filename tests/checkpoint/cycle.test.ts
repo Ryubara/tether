@@ -111,9 +111,20 @@ test('new information is the person\'s and the main agent\'s messages, not the c
     { role: 'user', text: 'and also the tests' },
     { role: 'assistant', text: 'the subagent reported the build is green' },
   ]
-  // four counted: the first request, the main agent's reply to it, the follow-up, and the subagent's report
+  // four counted: the first request, the follow-up, the subagent's report, and the first request from before the prompt
   expect(newInformation(msgs, cfg)).toBe(4)
   expect(newInformation(msgs.slice(0, 3), cfg)).toBe(2)
+})
+
+test('every message the model writes in reply to a cycle prompt is ignored, until the person writes again', () => {
+  const msgs = [
+    { role: 'user', text: askText(cfg, false) },
+    { role: 'assistant', text: 'Writing it now.' },
+    { role: 'assistant', text: 'Checked it, one more line.' },
+    { role: 'assistant', text: 'HANDOFF.md is written.' },
+  ]
+  expect(newInformation(msgs, cfg)).toBe(0)
+  expect(newInformation([...msgs, { role: 'user', text: 'thanks' }], cfg)).toBe(1)
 })
 
 test('the defaults wait five quiet seconds, checked every two', () => {

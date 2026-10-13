@@ -106,22 +106,22 @@ export function isCyclePrompt(text: string, cfg: CheckpointConfig): boolean {
 
 /**
  * How many messages are new information: every message with text, from you or from the main agent, except
- * the cycle's own prompts and the reply to each one (that reply only says the handoff is written).
+ * the cycle's own prompts and everything the model says in reply to them, until you send a message again.
+ * (A reply is often several messages: a line before a tool call, then the final line.)
  */
 export function newInformation(messages: Array<{ role: string; text?: string }>, cfg: CheckpointConfig): number {
   let n = 0
-  let awaitingReply = false
+  let replying = false
   for (const m of messages) {
     const text = (m.text ?? '').trim()
     if (text === '') continue
     if (m.role === 'user' && isCyclePrompt(text, cfg)) {
-      awaitingReply = true
+      replying = true
       continue
     }
-    if (m.role === 'assistant' && awaitingReply) {
-      awaitingReply = false
-      continue
-    }
+    // Your own message ends the reply to the cycle's prompt: from here on, new information again
+    if (m.role === 'user') replying = false
+    if (m.role === 'assistant' && replying) continue
     n++
   }
   return n
