@@ -75,7 +75,7 @@ async function fleetText($: any, on: any): Promise<string> {
   stub('ui.status', () => ({ value: undefined }))
   stub('ui.invalidate', () => ({ value: undefined }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  return ((await $.command.run({ command: 'fleet', args: 'text' } as any)) as any).text
+  return ((await $.command.run({ command: 'tether-fleet', args: 'text' } as any)) as any).text
 }
 
 test('the plugin reads its options: an off switch reaches the pane (here, no emoji)', { timeoutMs: 30_000, options: { fleetEmoji: false } }, async ($, on) => {

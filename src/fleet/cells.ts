@@ -1,4 +1,4 @@
-// One pane row as cells with a colour each: what the pane draws, and (joined) what /fleet text prints.
+// One pane row as cells with a colour each: what the pane draws, and (joined) what /tether-fleet text prints.
 
 import type { FleetConfig } from './config'
 import { BIG_WAIT, tokens, type Row } from './rows'

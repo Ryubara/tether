@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.17",
+  "version": "1.0.0-alpha.18",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -146,7 +146,7 @@
     "fleetEmoji": {
       "type": "boolean",
       "title": "Emoji in the pane",
-      "description": "An emoji per state and flag in the pane and /fleet text; off for plain text.",
+      "description": "An emoji per state and flag in the pane and /tether-fleet text; off for plain text.",
       "default": true
     },
     "fleetColumnTint": {

@@ -27,7 +27,7 @@ export type FleetConfig = {
   usageWarnPercent: number
   /** Pane colours by value (src/cells.ts PALETTE), each name overridable; `false` draws without colour. */
   colors: Partial<Record<'running' | 'waiting' | 'warn' | 'bad' | 'good' | 'note', string>> | false
-  /** An emoji per state and flag in the pane and /fleet text; `false` for plain text. */
+  /** An emoji per state and flag in the pane and /tether-fleet text; `false` for plain text. */
   emoji: boolean
   /** Cache minutes left at or under which the cache cell turns to the warning colour. */
   cacheWarnMinutes: number
