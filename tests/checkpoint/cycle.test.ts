@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../../src/checkpoint/config'
 import { handoffProblems } from '../../src/checkpoint/handoff'
-import { initialCycle, step, type Observed } from '../../src/checkpoint/cycle'
+import { askText, initialCycle, isCyclePrompt, repairText, step, type Observed } from '../../src/checkpoint/cycle'
 
 const cfg: CheckpointConfig = { ...CHECKPOINT_DEFAULTS, enabled: true, contextTokens: 1000, quietSeconds: 10, maxRepairs: 2 }
 const GOOD = '## Where to look\nx\n## Summary\nx\n## Next steps\nx\n## Open questions\nx\n'
@@ -87,6 +87,20 @@ test('a handoff passes only with every heading, within the size limit', () => {
   expect(handoffProblems('## Summary\nx\n', cfg).length).toBeGreaterThan(0)
   expect(handoffProblems(GOOD + 'x'.repeat(2000), { ...cfg, maxChars: 500 })[0]).toMatch(/characters/)
   expect(handoffProblems('', cfg)).toContain('the handoff is empty')
+})
+
+test('the cycle recognises its own prompts, so they never re-queue it; a person\'s message does', () => {
+  expect(isCyclePrompt(askText(cfg, false), cfg)).toBe(true)
+  expect(isCyclePrompt(askText(cfg, true), cfg)).toBe(true)
+  expect(isCyclePrompt(repairText(cfg, ['missing the heading "## Summary"']), cfg)).toBe(true)
+  expect(isCyclePrompt('Continue from HANDOFF.md.', cfg)).toBe(true)
+  expect(isCyclePrompt('Update the README for me', cfg)).toBe(false)
+  expect(isCyclePrompt('the build is green, go on', cfg)).toBe(false)
+})
+
+test('the defaults wait five quiet seconds, checked every two', () => {
+  expect(mergeCheckpoint({}).quietSeconds).toBe(5)
+  expect(mergeCheckpoint({}).tickSeconds).toBe(2)
 })
 
 test('mergeCheckpoint keeps defaults and takes only well-typed fields', () => {

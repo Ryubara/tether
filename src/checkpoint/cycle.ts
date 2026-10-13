@@ -90,6 +90,18 @@ export function repairText(cfg: CheckpointConfig, problems: string[]): string {
   return `${cfg.handoffFile} failed its check: ${problems.join('; ')}. Fix it and reply with one line.`
 }
 
+/** Whether a user message is one of the cycle's own prompts (which are not new information). */
+export function isCyclePrompt(text: string, cfg: CheckpointConfig): boolean {
+  const h = cfg.handoffFile
+  return (
+    text.startsWith('Checkpoint: this session is long') ||
+    text === `Write ${h} now.` ||
+    text.startsWith(`Update ${h} with what changed`) ||
+    text.startsWith(`${h} failed its check:`) ||
+    text === `Continue from ${h}.`
+  )
+}
+
 /** The prompt sent after the clear, so the new session picks the work up at once. */
 export function continueText(cfg: CheckpointConfig): string {
   return `Continue from ${cfg.handoffFile}.`

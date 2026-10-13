@@ -23,8 +23,8 @@ export type CheckpointConfig = {
 export const CHECKPOINT_DEFAULTS: CheckpointConfig = {
   enabled: false,
   contextTokens: 200_000,
-  quietSeconds: 90,
-  tickSeconds: 5,
+  quietSeconds: 5,
+  tickSeconds: 2,
   handoffFile: 'HANDOFF.md',
   maxChars: 9_500,
   sections: ['## Where to look', '## Summary', '## Next steps', '## Open questions'],

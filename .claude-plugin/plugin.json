@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.4",
+  "version": "1.0.0-alpha.5",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -38,8 +38,8 @@
     "checkpointQuietSeconds": {
       "type": "number",
       "title": "Quiet seconds before a checkpoint",
-      "description": "Seconds with no turn, no draft and no new message before the checkpoint acts.",
-      "default": 90
+      "description": "Seconds with no typing and no new message of yours before the checkpoint acts. A new message of yours re-queues it.",
+      "default": 5
     },
     "fleetEnabled": {
       "type": "boolean",
