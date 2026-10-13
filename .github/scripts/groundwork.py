@@ -182,7 +182,9 @@ def body_problems(conv: dict[str, Any], body: str) -> list[str]:
     closing = rule.get("closing")
     if closing:
         for line in _COMMENT.sub("", body).splitlines():
-            if re.match(rf"\s*{re.escape(closing['keyword'])}\b", line) and not re.fullmatch(
+            # Only a line that tries to be a closing line (the keyword, then `:`, `#` or a digit) is held to the
+            # form; a sentence that merely starts with the word ("Fixes the two tools ...") is prose.
+            if re.match(rf"\s*{re.escape(closing['keyword'])}\s*[:#\d]", line) and not re.fullmatch(
                 rf"{re.escape(closing['keyword'])} #\d+", line.strip()
             ):
                 problems.append(f"a closing line must read '{closing['form']}', one per line: {line.strip()!r}")
