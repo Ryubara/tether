@@ -92,7 +92,7 @@ export function agentFindings(p: AgentsPoller, agents: AgentSeen[], now: number,
     }
   }
   if (guard) {
-    const rules: AgentRules = { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, actAfterMinutes: p.actAfterMinutes, forgetMinutes: p.forgetAgentMinutes }
+    const rules: AgentRules = { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, actAfterMinutes: p.actAfterMinutes }
     for (const u of undecided(agents, guard.store, rules, now)) out.push({ key: `${u.id}|undecided`, text: u.text })
   }
   return out

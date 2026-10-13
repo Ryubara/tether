@@ -73,6 +73,27 @@ test('the guard refuses a cold big agent, and lets warm, small, unknown and over
   expect(coldGuard({ to: 'a1', message: 'go' }, agents, ledger, 75 * MIN, { ...DEFAULTS, coldGuard: false })).toBeUndefined()
 })
 
+test('a decided agent is never woken, warm or cold; an undecided warm one is; an undecided expired one is refused', async () => {
+  const ledger: Ledger = new Map()
+  recordStep(ledger, 'a1', 0, BIG, 60, 60_000)
+  recordStep(ledger, 'a2', 0, BIG, 60, 60_000)
+  const agents = [{ id: 'a1', status: 'waiting', name: 'worker' }, { id: 'a2', status: 'waiting', name: 'other' }]
+  const decisions = { a1: { decision: 'retired' as const, note: 'waits on CI', at: 't' } }
+  // Warm (10 min idle) and decided: refused, with the decision named
+  const deny = coldGuard({ to: 'worker', message: 'go' }, agents, ledger, 10 * MIN, DEFAULTS, new Map(), decisions)
+  expect(deny).toMatch(/decided retired \(waits on CI\).*never woken.*fresh agent/)
+  // Decided and cold too
+  expect(coldGuard({ to: 'a1', message: 'go' }, agents, ledger, 75 * MIN, DEFAULTS, new Map(), decisions)).toMatch(/decided retired/)
+  // The override token passes a decided agent
+  expect(coldGuard({ to: 'a1', message: '[cache-ok] go' }, agents, ledger, 10 * MIN, DEFAULTS, new Map(), decisions)).toBeUndefined()
+  // Undecided and warm: allowed (also past the 45-minute demand, before the cache expires)
+  expect(coldGuard({ to: 'other', message: 'go' }, agents, ledger, 50 * MIN, DEFAULTS, new Map(), decisions)).toBeUndefined()
+  // Undecided and expired: refused as before
+  expect(coldGuard({ to: 'other', message: 'go' }, agents, ledger, 75 * MIN, DEFAULTS, new Map(), decisions)).toMatch(/idle 75 min/)
+  // With the cold guard off nothing is refused
+  expect(coldGuard({ to: 'a1', message: 'go' }, agents, ledger, 10 * MIN, { ...DEFAULTS, coldGuard: false }, new Map(), decisions)).toBeUndefined()
+})
+
 test('the guard finds an agent by the name its Agent call gave, when the list lacks it', async () => {
   const ledger: Ledger = new Map()
   recordStep(ledger, 'a9', 0, BIG, 60, 60_000)

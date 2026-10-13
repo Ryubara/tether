@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.18",
+  "version": "1.0.0-alpha.19",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -80,13 +80,13 @@
     "fleetCacheTtlMinutes": {
       "type": "number",
       "title": "Agent cache lifetime (minutes)",
-      "description": "How long the prompt cache lives after an agent's last request (5, or 60 with subagentPromptCacheTtl 1h).",
+      "description": "How long the prompt cache is taken to live after an agent's last request (5, or 60 with subagentPromptCacheTtl 1h). It is also the idle time from which waking an undecided big agent is refused, so a lower value adds a safety margin before the real expiry.",
       "default": 60
     },
     "fleetBigContextTokens": {
       "type": "number",
       "title": "Big agent context (tokens)",
-      "description": "Context size from which an expired cache is worth guarding.",
+      "description": "Context size from which an agent is guarded: decided when it has been idle long enough, refused a wake-up once its cache has expired.",
       "default": 60000
     },
     "fleetRetireContextTokens": {
@@ -110,7 +110,7 @@
     "fleetColdGuard": {
       "type": "boolean",
       "title": "Cold-cache guard",
-      "description": "Refuse SendMessage to a big agent whose cache has expired, unless the message starts with the override token.",
+      "description": "Refuse SendMessage to an agent with a recorded decision, and to an undecided big agent whose cache has expired, unless the message starts with the override token.",
       "default": true
     },
     "fleetOverrideToken": {

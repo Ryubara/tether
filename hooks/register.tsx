@@ -305,9 +305,9 @@ const registerFleet: Register = (on, options) => {
 
   // Every model request, main loop and subagents alike: keep the ledger, and flag a cold re-write.
 
-  // Waking a big agent on an expired cache: refuse, with the numbers and the way to insist.
+  // Waking a decided agent, or a big one on an expired cache: refuse, with the reason and the way to insist.
   on('tool.call', { tool: 'SendMessage' }, async ($, e, next) => {
-    const deny = coldGuard(e as any, agents, ledger, await $.clock.now(), cfg, names)
+    const deny = coldGuard(e as any, agents, ledger, await $.clock.now(), cfg, names, (await guardStore($)).decisions)
     return deny ? { deny } : next(e)
   }).catch(($, e, next) => next(e))
 
@@ -525,7 +525,7 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
         const guard = { store: await guardStore($), cacheMinutes: cfg.cacheTtlMinutes, smallTokens: cfg.bigContextTokens }
         result = { findings: agentFindings(p, seen, at, guard) }
         // The Stop hook blocks over the same agents the poller tells
-        lastUndecided = undecided(seen, guard.store, { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, actAfterMinutes: p.actAfterMinutes, forgetMinutes: p.forgetAgentMinutes }, at)
+        lastUndecided = undecided(seen, guard.store, { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, actAfterMinutes: p.actAfterMinutes }, at)
       } catch (err) {
         result = { error: String(err) }
       }

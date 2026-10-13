@@ -72,7 +72,7 @@ test('readStore keeps well-formed records and drops the rest', async () => {
 })
 
 test('undecided lists stopped big agents past the act-after time, until decided', async () => {
-  const rules = { cacheMinutes: 60, smallTokens: 60_000, actAfterMinutes: 45, forgetMinutes: 180 }
+  const rules = { cacheMinutes: 60, smallTokens: 60_000, actAfterMinutes: 45 }
   const agent = (id: string, status: string, minutes: number, ctx: number) => ({ id, status, label: id, lastStepAt: NOW - minutes * MIN, contextTokens: ctx })
   const agents = [
     agent('soon', 'completed', 50, 200_000),
@@ -80,14 +80,18 @@ test('undecided lists stopped big agents past the act-after time, until decided'
     agent('early', 'completed', 10, 200_000),
     agent('small', 'completed', 50, 1_000),
     agent('old', 'completed', 300, 200_000),
+    agent('edge', 'completed', 44, 200_000),
     agent('busy', 'running', 50, 200_000),
   ]
   const found = undecided(agents, EMPTY_STORE, rules, NOW)
-  expect(found.map(u => u.id)).toEqual(['soon', 'expired'])
+  // Not before 45 minutes ('edge' at 44), and an agent quiet for hours is not forgotten
+  expect(found.map(u => u.id)).toEqual(['soon', 'expired', 'old'])
   expect(found[0]?.text).toContain('cache expires in ~10 min')
   expect(found[1]?.text).toContain('cache EXPIRED')
   const decided = recordDecision(EMPTY_STORE, 'soon', 'retired', 'n', 't')
-  expect(undecided(agents, decided, rules, NOW).map(u => u.id)).toEqual(['expired'])
+  expect(undecided(agents, decided, rules, NOW).map(u => u.id)).toEqual(['expired', 'old'])
+  // At exactly 45 minutes it is demanded
+  expect(undecided([agent('edge', 'completed', 45, 200_000)], EMPTY_STORE, rules, NOW).map(u => u.id)).toEqual(['edge'])
   expect(agentStop(found)).toContain('agent_decision')
 })
 
@@ -102,7 +106,9 @@ test('the agents poller adds undecided agents when given the guard, and prs poll
   expect(problems).toEqual(['bad: command must be a non-empty list of strings'])
   const agents = config.pollers[0] as AgentsPoller
   const prs = config.pollers[1] as PrsPoller
-  expect([agents.actAfterMinutes, agents.forgetAgentMinutes]).toEqual([30, 180])
+  expect(agents.actAfterMinutes).toBe(30)
+  // The removed forgetAgentMinutes is read without error and ignored
+  expect(parseConfig({ pollers: [{ id: 'agents', kind: 'agents', forgetAgentMinutes: 5 }] }).problems).toEqual([])
   expect([prs.command, prs.requireAutoMerge, prs.ignoreDrafts, prs.worktrees, prs.assignHours, prs.rerunHours, prs.stuckMinutes, prs.everySeconds]).toEqual([['x'], true, true, 'wt', 2, 3, 90, 300])
   const seen = [{ id: 'a1', status: 'completed', label: 'worker', lastStepAt: NOW - 50 * MIN, contextTokens: 100_000 }]
   expect(agentFindings(agents, seen, NOW)).toEqual([])
