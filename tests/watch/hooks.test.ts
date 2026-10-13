@@ -119,14 +119,14 @@ test('no wake while a turn runs; it goes when the turn completes', { timeoutMs: 
   expect(w.submits.length).toBe(1)
 })
 
-test('a failing poller is logged once per reason and shows in /watch', { timeoutMs: 30_000 }, async ($, on) => {
+test('a failing poller is logged once per reason and shows in /tether-watch', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('', 1)
   w.runs = [{ exitCode: 1, stdout: '', stderr: 'GitHub could not be read' }]
   const clock = await start($, on, PRS, w)
   await clock.advance(3 * SEC)
   await clock.advance(10 * MIN)
   expect(w.logs).toEqual(['watch: prs failed: exit 1: GitHub could not be read'])
-  const report: any = await $.command.run({ command: 'watch', args: '' } as any)
+  const report: any = await $.command.run({ command: 'tether-watch', args: '' } as any)
   expect(report.text).toMatch(/- prs \(every 300s, next in [0-9:]+\): FAILED 0 min ago: exit 1: GitHub could not be read/)
   expect(w.submits).toEqual([])
 })
@@ -143,17 +143,17 @@ test('the agents poller wakes for a running agent gone silent, once per silence'
   expect(w.submits.length).toBe(1)
 })
 
-test('/watch forget makes told findings new again; /watch run polls now', { timeoutMs: 30_000 }, async ($, on) => {
+test('/tether-watch forget makes told findings new again; /tether-watch run polls now', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('- #12 fix-x: conflict\n')
   const clock = await start($, on, PRS, w)
   await clock.advance(3 * SEC)
   expect(w.submits.length).toBe(1)
-  await $.command.run({ command: 'watch', args: 'forget prs' } as any)
+  await $.command.run({ command: 'tether-watch', args: 'forget prs' } as any)
   await clock.advance(2 * MIN)
-  await $.command.run({ command: 'watch', args: 'run prs' } as any)
+  await $.command.run({ command: 'tether-watch', args: 'run prs' } as any)
   await clock.advance(6 * SEC)
   expect(w.submits.length).toBe(2)
-  const r: any = await $.command.run({ command: 'watch', args: 'run nope' } as any)
+  const r: any = await $.command.run({ command: 'tether-watch', args: 'run nope' } as any)
   expect(r.text).toBe('watch: no poller "nope"')
 })
 
@@ -171,11 +171,11 @@ test('the status line counts down to each poller and the state file carries the 
   expect(state.pollers[0].nextAt).toBeGreaterThan(state.updatedAt)
 })
 
-test('/watch pane draws a box per poller with its countdown and findings', { timeoutMs: 30_000 }, async ($, on) => {
+test('/tether-watch pane draws a box per poller with its countdown and findings', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('- #7 conflict with main')
   const clock = await start($, on, { ...PRS, pollers: [PRS.pollers[0], { id: 'agents', kind: 'agents', everySeconds: 60 }] }, w)
   await clock.advance(10 * SEC)
-  expect(await $.command.run({ command: 'watch', args: 'pane' } as any)).toEqual({})
+  expect(await $.command.run({ command: 'tether-watch', args: 'pane' } as any)).toEqual({})
   const ui: any = await $.ui.mount({
     plugin: 'watch',
     surface: 'terminal',

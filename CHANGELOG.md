@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0-alpha.18
+
+- Changed: every command now carries the `tether-` prefix, so Tether's commands sort together and cannot clash
+  with another plugin's: `/fleet` is now `/tether-fleet`, `/watch` is `/tether-watch`, `/guards` is
+  `/tether-guards`. The old names are gone (no aliases). The prefix is a hyphen because `$.command.register`
+  refuses `:` in a name (letters, digits, `_`, `-`). The description of a command that opens or shows something
+  in the pane (`/tether-fleet`, `/tether-watch`) ends with `(PANE)`; `/tether-guards` only prints text.
+
 ## 1.0.0-alpha.17
 
 - Added: `checkpoint.injectHandoff` (default off; a plugin option, 44 in all). At each session start the handoff

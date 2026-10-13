@@ -67,10 +67,10 @@ test('an agent started before fleet loaded gets its context and idle time, a res
   stub('ui.invalidate', () => ({ value: undefined }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:/work' })
 
-  const first: any = await $.command.run({ command: 'fleet', args: 'text' } as any)
+  const first: any = await $.command.run({ command: 'tether-fleet', args: 'text' } as any)
   expect(first.text).toMatch(/^⏳ build wait\s+waiting \(bg work\)\s+90k\s+30m\s+30m$/m)
   // An unchanged transcript is not read again
   const count = reads.length
-  await $.command.run({ command: 'fleet', args: 'text' } as any)
+  await $.command.run({ command: 'tether-fleet', args: 'text' } as any)
   expect(reads.length).toBe(count)
 })

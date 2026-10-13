@@ -12,17 +12,20 @@ run inside Claude Code (version 2.1.287 or later). See the
 - **Fleet.** An agents pane and a status line: each subagent's state, context size, idle time and
   prompt-cache minutes left, with flags that say what waking it would cost. The `SendMessage` guard refuses
   to wake a big agent whose prompt cache has expired (waking it re-writes the whole context into the cache),
-  for the main agent and for subagents. `/fleet` opens the pane; `/fleet text` prints it.
+  for the main agent and for subagents. `/tether-fleet` opens the pane; `/tether-fleet text` prints it.
   **BIG-WAIT**: with `fleet.bigWaitTokens` set (0, the default, is off), a live agent whose context has reached
   it and whose annotation note (`fleet.annotate`) matches `fleet.bigWaitNote` (a regular expression, matched
   case-insensitively; empty: any note, but an agent with no note never matches) shows `BIG-WAIT` in the FLAGS
-  column, in `/fleet text` and as a count in the status line: it holds a big context while only waiting, so retire
+  column, in `/tether-fleet text` and as a count in the status line: it holds a big context while only waiting, so retire
   it and start a small successor from its status notes. `fleet.usageWarnPercent` (the `!` after a rate limit) is
   only shown with `fleet.showSession`, because only then does fleet read the rate limits.
 - **Watch.** Pollers that run inside the session: each finding is told once, and a model turn starts only for
-  new findings, never during a turn or while you type. `/watch` only reports (it never stops polling);
-  `/watch pane` shows a box per poller with its countdown and its findings; `/watch run`, `forget` and
+  new findings, never during a turn or while you type. `/tether-watch` only reports (it never stops polling);
+  `/tether-watch pane` shows a box per poller with its countdown and its findings; `/tether-watch run`, `forget` and
   `reload` poll now, tell findings again and re-read the config.
+- **Commands.** `/tether-fleet` (pane; `text` prints it), `/tether-watch` (pane; `run`, `forget`, `reload`) and
+  `/tether-guards` (text). Pane commands say `(PANE)` in the command list. The names are prefixed with `tether-`
+  because the plugin API takes only letters, digits, `_` and `-` in a command name (no `:`).
 - **Services row.** The pane starts with one line naming each service: `✅ Fleet` in green when it is on,
   `❌ Watch` dimmed when it is off. A service is off when its section sets `"enabled": false`; it then runs
   nothing (no polls, no refresh, no guard, no status text).
@@ -41,7 +44,7 @@ run inside Claude Code (version 2.1.287 or later). See the
   checks, CI that seems stuck, auto-merge off (opt in), or work in a worktree that was never pushed. By default it
   reads GitHub with `gh`; `command` swaps in the project's own health command (its JSON is `{ "stuck": [...], "rerun": [...] }`). The command
   may exit 1 to say "something is stuck": `okExitCodes` (default `[0, 1]`) lists the exit codes whose output is read;
-  any other code (or output that is not JSON) is an error shown in `/watch`, never a quiet pass.
+  any other code (or output that is not JSON) is an error shown in `/tether-watch`, never a quiet pass.
   The optional `rerun` list says what the command did about failed checks. Each entry is told as an information
   line (never an owner, never blocks Stop) and has these fields; unknown fields are ignored and a project with no
   `rerun` key is unaffected:
@@ -56,7 +59,7 @@ run inside Claude Code (version 2.1.287 or later). See the
 - **Agent guard.** The agents poller also tells stopped agents with a big context that nobody has decided about
   as their prompt cache runs out (an agent that stepped before Tether loaded is read from its transcript); the model records `retired` or `done` with `mcp__tether__agent_decision`.
 - **Stop hook.** The end of a turn is blocked while a PR problem or an undecided agent is open, at most
-  `stop.maxBlocks` times in a row for the same reason. `/guards` prints what is open.
+  `stop.maxBlocks` times in a row for the same reason. `/tether-guards` prints what is open.
 - **Housekeeping.** Tether's folder, the handoff and a project-relative config go into `.git/info/exclude` (no
   tracked file is touched); a missing `HANDOFF.md` is made from the template; a Write of it that breaks the
   template is refused.
@@ -108,7 +111,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `fleetUsageWarnPercent` | `90` | A rate limit at or above this percent gets a !. Only shown with Show session context. |
 | `fleetRefreshSeconds` | `15` | Seconds between refreshes of the agent list, usage and annotations. |
 | `fleetCacheWarnMinutes` | `15` | Cache minutes left at or under which the cache cell turns to the warning colour. |
-| `fleetEmoji` | `true` | An emoji per state and flag in the pane and /fleet text; off for plain text. |
+| `fleetEmoji` | `true` | An emoji per state and flag in the pane and /tether-fleet text; off for plain text. |
 | `fleetColumnTint` | (empty) | true bands alternate columns with the theme colour, false divides columns with a bar, or give a colour. Empty: true. |
 | `fleetWatchState` | (empty) | A state file watch writes; when set the pane draws watch boxes under the table. Empty: none. |
 | `fleetPaneRows` | `0` | Rows asked for the pane when inline above the prompt. 0: Claude Code decides. |

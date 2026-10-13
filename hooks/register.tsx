@@ -26,6 +26,7 @@ import { pruneOwners, readStore, recordDecision, recordOwner, recordRerun, type 
 import { layered } from '../src/options/options'
 import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
 import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
+import { FLEET, GUARDS, WATCH, registration } from '../src/commands/commands'
 import { logName, renderConversation, type LogMessage } from '../src/conversation/render'
 
 // ---- FLEET ----
@@ -267,7 +268,7 @@ const fleetStart = async ($: any, e: any, next: any): Promise<any> => {
     timers.push($.clock.after(1000, () => annotate($).then(() => refresh($))) as any)
   }
   try {
-    await $.command.register({ name: 'fleet', description: 'Agents, context, cache and usage (fleet)', argumentHint: '[text]', immediate: true })
+    await $.command.register({ ...registration(FLEET), immediate: true })
   } catch {}
   return next(e)
 }
@@ -328,8 +329,8 @@ const registerFleet: Register = (on, options) => {
     return r
   })
 
-  // `/fleet` opens the pane; `/fleet text` answers in the transcript (also what headless sessions get).
-  on('command.run', { command: 'fleet' }, async ($, e) => {
+  // `/tether-fleet` opens the pane; `/tether-fleet text` answers in the transcript (also what headless sessions get).
+  on('command.run', { command: FLEET.name }, async ($, e) => {
     await refresh($)
     const wantsText = (e as any).args?.trim() === 'text'
     let placed = false
@@ -413,12 +414,12 @@ const registerFleet: Register = (on, options) => {
 const WATCH_CONFIG_FILE = CONFIG_FILE
 /** How often watch checks whether pending findings can be delivered. */
 const DELIVER_MS = 5_000
-/** The pane's id (`/watch pane`). */
+/** The pane's id (`/tether-watch pane`). */
 const WATCH_PANE = 'watch'
 /** Log lines kept per poller (the box shows the newest few). */
 const LOG_KEEP = 50
 
-/** What the last run of a poller came to, for /watch and the status line. */
+/** What the last run of a poller came to, for /tether-watch and the status line. */
 type LastRun = { at: number; ok: boolean; found: number; told: number; error?: string }
 
 let watchConfigFile = WATCH_CONFIG_FILE
@@ -662,12 +663,12 @@ async function status($: any): Promise<void> {
   showStatus($)
 }
 
-/** Minutes ago, for /watch. */
+/** Minutes ago, for /tether-watch. */
 function ago(now: number, at: number): string {
   return `${Math.round((now - at) / 60_000)} min ago`
 }
 
-/** /watch's report: each poller's last run, what waits to be told, the config's problems. */
+/** /tether-watch's report: each poller's last run, what waits to be told, the config's problems. */
 async function report($: any): Promise<string> {
   const now = await $.clock.now()
   const lines = [`watch: ${watchConfigFile}, ${wcfg.pollers.length} pollers`]
@@ -723,7 +724,7 @@ const watchStart = async ($: any, e: any, next: any): Promise<any> => {
   await getPending($)
   await schedule($)
   try {
-    await $.command.register({ name: 'watch', description: 'Pollers and what they found (watch)', argumentHint: '[run [id] | forget [id] | reload | pane]', immediate: true })
+    await $.command.register({ ...registration(WATCH), immediate: true })
   } catch {}
   await status($)
   return next(e)
@@ -763,8 +764,8 @@ const registerWatch: Register = (on, options) => {
 
   // Each subagent request: when it ended and how big the context is, for the agents poller.
 
-  // `/watch` reports; `run [id]` polls now; `forget [id]` clears the seen-set so findings are new again; `reload` re-reads the config; `pane` opens the pane of boxes.
-  on('command.run', { command: 'watch' }, async ($, e) => {
+  // `/tether-watch` reports; `run [id]` polls now; `forget [id]` clears the seen-set so findings are new again; `reload` re-reads the config; `pane` opens the pane of boxes.
+  on('command.run', { command: WATCH.name }, async ($, e) => {
     const [verb, id] = String((e as any).args ?? '').trim().split(/\s+/)
     const chosen = (id ? wcfg.pollers.filter(p => p.id === id) : wcfg.pollers)
     if (id && chosen.length === 0) return { text: `watch: no poller "${id}"` }
@@ -1055,7 +1056,7 @@ async function agentDecisionCall($: any, e: any): Promise<any> {
   return toolText(`${e.id.trim()} recorded as ${e.decision}.`)
 }
 
-/** What /guards prints: the PR problems nobody owns, the owners and waivers, the agents awaiting a decision. */
+/** What /tether-guards prints: the PR problems nobody owns, the owners and waivers, the agents awaiting a decision. */
 async function guardsReport($: any): Promise<string> {
   const now = await $.clock.now()
   const store = await guardStore($)
@@ -1170,7 +1171,7 @@ export const register: Register = (on, opts) => {
     await housekeepingStart($)
     await registerGuardTools($)
     try {
-      await $.command.register({ name: 'guards', description: 'PR problems and stopped agents nobody has dealt with (guards)', immediate: true })
+      await $.command.register({ ...registration(GUARDS), immediate: true })
     } catch {}
     return fleetStart($, e, (e2: any) => watchStart($, e2, next))
   })
@@ -1178,7 +1179,7 @@ export const register: Register = (on, opts) => {
   // The model records an owner, a waiver or a decision with these tools.
   on('tool.call', { tool: `mcp__tether__${TOOL_PR}` }, async ($, e) => prOwnerCall($, e))
   on('tool.call', { tool: `mcp__tether__${TOOL_AGENT}` }, async ($, e) => agentDecisionCall($, e))
-  on('command.run', { command: 'guards' }, async ($) => ({ text: await guardsReport($) }))
+  on('command.run', { command: GUARDS.name }, async ($) => ({ text: await guardsReport($) }))
 
   // The end of a turn is blocked while a PR problem or a stopped big agent has no owner or decision, at most
   // `stop.maxBlocks` times in a row for the same reason.

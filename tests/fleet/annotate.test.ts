@@ -40,6 +40,6 @@ test('configPath picks the config file, and annotate notes find an agent by its 
   await clock.advance(1_500)
   expect(read).toEqual(['config'])
   expect(ran).toEqual([['notes', '--json']])
-  const text: any = await $.command.run({ command: 'fleet', args: 'text' } as any)
+  const text: any = await $.command.run({ command: 'tether-fleet', args: 'text' } as any)
   expect(text.text).toMatch(/^⏳ builder\s+waiting \(bg work\).*· queued: main 2\/3, 4m$/m)
 })

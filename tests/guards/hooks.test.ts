@@ -108,7 +108,7 @@ test('a PR problem is told, blocks the Stop hook until owned, and an owner ends 
   expect(typeof (done.result ?? done.text)).toBe('string')
   const after: any = await ($ as any).classic.Stop({ stop_hook_active: false })
   expect(after.block).toBeUndefined()
-  const report: any = await $.command.run({ command: 'guards' } as any)
+  const report: any = await $.command.run({ command: 'tether-guards' } as any)
   expect(report.text).toContain('owner #12: agent-7')
 })
 
@@ -223,7 +223,7 @@ test('a rerun the health command made is told as information and owns the failed
   expect(w.submits[0]).not.toContain('checks-failed')
   const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
   expect(stop.block).toBeUndefined()
-  const report: any = await $.command.run({ command: 'guards' } as any)
+  const report: any = await $.command.run({ command: 'tether-guards' } as any)
   expect(report.text).toContain('0 without an owner')
   expect(report.text).toContain('info: #12 fix-x: rerun build, lint (run 99) reran: infra; infra')
 })
