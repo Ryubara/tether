@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0-alpha.15
+
+- Added: a `prs` poller reads the `rerun` list of the project health command's JSON. Every entry is told as an
+  information line that never blocks Stop; an entry with status `would-rerun` or `reran` owns that PR's
+  `checks-failed` problem (for the poller's new `rerunHours`, default 3), so it is not told as unowned. The
+  entry's fields are in the README. A project with no `rerun` key is unaffected.
+
 ## 1.0.0-alpha.14
 
 - Fixed: the agent guard forgot every agent that had stepped before Tether loaded (a plugin reload, a restart, a

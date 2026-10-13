@@ -2,7 +2,7 @@
 // told. A problem is keyed PR + cause + head commit, so a new push is a new problem. The reading of GitHub
 // and of the worktrees is in hooks/register.tsx; this file only turns what was read into problems.
 
-import { ownerCovers, type GuardStore } from './store'
+import { ownerCovers, rerunCovers, type GuardStore } from './store'
 
 /** One problem with an open PR. */
 export type Problem = {
@@ -16,6 +16,8 @@ export type Problem = {
   sha: string
   /** More identity for the key (the failing checks). */
   extra: string
+  /** An information line (a rerun the project's command reported): told, never owned, never blocks Stop. */
+  info?: true
 }
 
 /** The identity a problem is told by: PR + cause + head commit (+ extra). */
@@ -71,8 +73,8 @@ export type Stuck = { number: number; cause: string; kind?: string; detail?: str
 
 /**
  * The problems in a project's own health command's JSON (`{ "stuck": [...] }`), with the PR heads and
- * branches `gh pr list` gave for the numbers an entry does not name itself. Anything else in the answer
- * (a project's rerun lines, say) is ignored.
+ * branches `gh pr list` gave for the numbers an entry does not name itself. Its `rerun` list is read by
+ * `rerunsFromHealth`; anything else in the answer is ignored.
  */
 export function fromHealth(data: unknown, heads: Map<number, { branch: string; sha: string }>): Problem[] {
   const stuck = (data as { stuck?: unknown } | null)?.stuck
@@ -99,9 +101,78 @@ export function unpushedProblem(number: number, branch: string, ahead: number, s
   return { number, branch, cause: 'unpushed', text: `worktree ${branch} is ${ahead} commits ahead of origin, not pushed`, sha, extra: '' }
 }
 
-/** The problems with no current owner or waiver, sorted by PR then text. */
+/** One entry of a project's `rerun` list; fields not named here are ignored. */
+export type Rerun = {
+  number: number
+  branch?: string
+  /** The workflow run that was (or would be) rerun. */
+  run?: number
+  /** The failed checks, sorted. */
+  checks: string[]
+  /** Why each check was chosen, in the order of `checks`. */
+  reasons: string[]
+  /** `would-rerun`, `reran`, `refused`, `capped` or `new-event`. */
+  status: string
+  /** Why a rerun was refused or capped; empty otherwise. */
+  detail?: string
+}
+
+/** The statuses that say a rerun is under way (or would be), so it owns its PR's failed checks. The others (`refused`, `capped`, `new-event`) cannot fix it. */
+export const ACTIVE_RERUN = new Set(['would-rerun', 'reran'])
+
+/** The well-formed entries (a number and a status) of a health command's `rerun` list, checks sorted. */
+export function rerunsFromHealth(data: unknown): Rerun[] {
+  const list = (data as { rerun?: unknown } | null)?.rerun
+  if (!Array.isArray(list)) return []
+  const out: Rerun[] = []
+  for (const x of list as Array<Partial<Rerun> | null>) {
+    if (!x || typeof x.number !== 'number' || typeof x.status !== 'string' || x.status === '') continue
+    const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((c): c is string => typeof c === 'string') : [])
+    out.push({
+      number: x.number,
+      checks: strings(x.checks).sort(),
+      reasons: strings(x.reasons),
+      status: x.status,
+      ...(typeof x.branch === 'string' && x.branch !== '' ? { branch: x.branch } : {}),
+      ...(typeof x.run === 'number' ? { run: x.run } : {}),
+      ...(typeof x.detail === 'string' && x.detail !== '' ? { detail: x.detail } : {}),
+    })
+  }
+  return out
+}
+
+/** The lines for a health command's reruns, with the PR heads and branches `gh pr list` gave. Every entry is told; only an active one (see ACTIVE_RERUN) also owns the problem. */
+export function rerunInfo(reruns: Rerun[], heads: Map<number, { branch: string; sha: string }>): Problem[] {
+  return reruns.map(r => {
+    const head = heads.get(r.number)
+    const why = r.detail ?? r.reasons.join('; ')
+    return {
+      number: r.number,
+      branch: r.branch ?? head?.branch ?? '?',
+      cause: `rerun-${r.status}`,
+      text: ['rerun', r.checks.join(', '), r.run === undefined ? '' : `(run ${r.run})`, r.status + (why ? `: ${why}` : '')].filter(Boolean).join(' '),
+      sha: head?.sha ?? '?',
+      extra: `${r.run ?? ''}:${r.checks.join(',')}`,
+      info: true as const,
+    }
+  })
+}
+
+/** Whether a rerun recorded in the store owns this problem (failed checks, every one rerun, same head). */
+function rerunOwns(p: Problem, store: GuardStore, now: number): boolean {
+  return rerunCovers(store.reruns[String(p.number)], p.cause, p.extra === '' ? [] : p.extra.split(','), p.sha, now)
+}
+
+/** The problems with no current owner, waiver or rerun, sorted by PR then text. Information lines never count. */
 export function unowned(problems: Problem[], store: GuardStore, now: number): Problem[] {
-  return problems.filter(p => !ownerCovers(store.owners[String(p.number)], p.cause, now)).sort((a, b) => a.number - b.number || a.text.localeCompare(b.text))
+  return problems
+    .filter(p => !p.info && !ownerCovers(store.owners[String(p.number)], p.cause, now) && !rerunOwns(p, store, now))
+    .sort((a, b) => a.number - b.number || a.text.localeCompare(b.text))
+}
+
+/** What a poll tells: the unowned problems and the information lines, sorted by PR then text. */
+export function toldProblems(problems: Problem[], store: GuardStore, now: number): Problem[] {
+  return [...unowned(problems, store, now), ...problems.filter(p => p.info)].sort((a, b) => a.number - b.number || a.text.localeCompare(b.text))
 }
 
 /** How a model is told to deal with problems nobody owns. */
