@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.16",
+  "version": "1.0.0-alpha.17",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -58,6 +58,12 @@
       "title": "Handoff size limit (characters)",
       "description": "The handoff is injected into the next session, so it must stay under this size.",
       "default": 9500
+    },
+    "checkpointInjectHandoff": {
+      "type": "boolean",
+      "title": "Add the handoff at session start",
+      "description": "When a session starts (new, resumed, cleared or compacted) and the handoff file exists, add its text to the session as context.",
+      "default": false
     },
     "checkpointMaxRepairs": {
       "type": "number",

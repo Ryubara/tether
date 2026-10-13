@@ -16,6 +16,8 @@ export type CheckpointConfig = {
   maxChars: number
   /** Headings the handoff must contain, in any order. */
   sections: string[]
+  /** At session start (every source), the handoff's text is added to the session as context (the 0.x behaviour). */
+  injectHandoff: boolean
   /** Repair attempts before the cycle gives up and the session carries on. */
   maxRepairs: number
 }
@@ -29,6 +31,7 @@ export const CHECKPOINT_DEFAULTS: CheckpointConfig = {
   maxChars: 9_500,
   sections: ['## Where to look', '## Summary', '## Next steps', '## Open questions'],
   maxRepairs: 3,
+  injectHandoff: false,
 }
 
 /** Merges a parsed `checkpoint` section over the defaults, keeping only well-typed fields. */
@@ -37,6 +40,7 @@ export function mergeCheckpoint(raw: unknown): CheckpointConfig {
   if (raw === null || typeof raw !== 'object') return out
   const r = raw as Record<string, unknown>
   if (typeof r.enabled === 'boolean') out.enabled = r.enabled
+  if (typeof r.injectHandoff === 'boolean') out.injectHandoff = r.injectHandoff
   for (const k of ['contextTokens', 'quietSeconds', 'tickSeconds', 'maxChars', 'maxRepairs'] as const) {
     if (typeof r[k] === 'number' && Number.isFinite(r[k]) && (r[k] as number) > 0) out[k] = r[k] as number
   }

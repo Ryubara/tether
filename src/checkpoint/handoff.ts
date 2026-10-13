@@ -18,3 +18,22 @@ export function handoffProblems(text: string, cfg: CheckpointConfig): string[] {
 function escapeRegExp(s: string): string {
   return s.split('').map(c => ('.*+?^${}()|[]\\/'.includes(c) ? '\\' + c : c)).join('')
 }
+
+/** The most lines of a handoff that are injected into a session. */
+export const INJECT_MAX_LINES = 400
+
+/** The line above the injected handoff. */
+export const INJECT_HEADER = 'Project state from the handoff file (Tether)'
+
+/**
+ * The context text for an injected handoff: a header line, then the file, cut at `INJECT_MAX_LINES` with a
+ * note to trim it. Undefined for an empty file.
+ */
+export function injectedHandoff(file: string, text: string): string | undefined {
+  if (text.trim() === '') return undefined
+  const lines = text.replace(/\s+$/, '').split(/\r?\n/)
+  const body = lines.length > INJECT_MAX_LINES
+    ? [...lines.slice(0, INJECT_MAX_LINES), `[${file} is ${lines.length} lines; only the first ${INJECT_MAX_LINES} are shown. Trim it.]`]
+    : lines
+  return [`${INJECT_HEADER}: ${file}`, '', ...body].join('\n')
+}

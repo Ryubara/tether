@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-alpha.17
+
+- Added: `checkpoint.injectHandoff` (default off; a plugin option, 44 in all). At each session start the handoff
+  file's text is added to the session as context, as the 0.x plugin did, through the `classic.SessionStart` hook's
+  `additionalContext` (the `session.start` event returns no context). Cut at 400 lines.
+
 ## 1.0.0-alpha.16
 
 - Added: the fleet flag `BIG-WAIT`. With `fleet.bigWaitTokens` set (default 0, off) a live agent whose context has

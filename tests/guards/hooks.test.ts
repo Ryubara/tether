@@ -46,7 +46,7 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('fs.read', ($: any, e: any) => {
     const k = transcript(e.path)
     if (k !== undefined) return { value: w.transcripts[k] }
-    return { value: e.path.endsWith('tether.json') ? JSON.stringify(config) : (w.files[e.path] ?? '') }
+    return { value: e.path.endsWith('tether.json') ? JSON.stringify(config) : (w.files[e.path.replace(/\\/g, '/')] ?? w.files[e.path] ?? '') }
   })
   on('fs.write', ($: any, e: any) => {
     w.files[e.path.replace(/\\/g, '/')] = e.text
@@ -76,6 +76,7 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('session.id', () => ({ value: 'abcdef12-0000' }))
   on('session.messages', () => ({ value: w.messages }))
   on('classic.Stop', () => ({}))
+  on('classic.SessionStart', () => ({}))
   on('tool.call', () => ({ result: 'ok' }))
   on('turn.step', async function* ($: any, e: any) {
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { input_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 150_000 } }
@@ -238,4 +239,29 @@ test('a rerun that cannot fix the problem is told but owns nothing, and the reru
   const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
   expect(stop.block).toContain('#12 fix-x: checks-failed')
   expect(stop.block).not.toContain('rerun build')
+})
+
+test('checkpoint.injectHandoff adds the handoff to the session at start, capped; off it adds nothing', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world()
+  await start($, on, { checkpoint: { injectHandoff: true } }, w)
+  // Housekeeping made the handoff from the template; put real text in its place
+  const path = Object.keys(w.files).find(k => k.endsWith('/HANDOFF.md'))!
+  w.files[path] = 'Line one\n' + Array.from({ length: 500 }, (_, i) => `row ${i}`).join('\n')
+  const r: any = await ($ as any).classic.SessionStart({ source: 'startup' })
+  expect(r.additionalContext.length).toBe(1)
+  expect(r.additionalContext[0]).toContain('Project state from the handoff file (Tether)')
+  expect(r.additionalContext[0]).toContain('Line one')
+  expect(r.additionalContext[0]).toContain('row 398')
+  expect(r.additionalContext[0]).not.toContain('row 399')
+  expect(r.additionalContext[0]).toContain('is 501 lines; only the first 400 are shown')
+  // Every start source gets it
+  const cleared: any = await ($ as any).classic.SessionStart({ source: 'compact' })
+  expect(cleared.additionalContext.length).toBe(1)
+})
+
+test('without injectHandoff, or without a handoff, the session start adds no context', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world()
+  await start($, on, {}, w)
+  const off: any = await ($ as any).classic.SessionStart({ source: 'startup' })
+  expect(off?.additionalContext).toBeUndefined()
 })
