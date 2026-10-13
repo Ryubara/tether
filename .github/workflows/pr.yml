@@ -1,0 +1,60 @@
+# Checks that only make sense on a pull request, all driven by .github/conventions.yml. A pull request is
+# squash-merged, so its title becomes the one commit on the default branch (the title check); its description must
+# follow the template (the body check); and a change to code must change the docs (the docs check). A title and a
+# description are attacker-controlled: they reach the checker only through an environment variable and a file,
+# never expanded into a script's text. The checker exits 0 (pass), 1 (refused) or 2 (conventions unusable).
+# Actions are pinned to a full commit SHA; the tag is in the comment beside it.
+name: pr
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+# An edit gets its own group, so it never cancels the run of a push that is still going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Check the title against the commit conventions
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | uv run --with pyyaml python .github/scripts/groundwork.py check-title -
+
+  body:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Check the description against the template
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+          uv run --with pyyaml python .github/scripts/groundwork.py check-body --body "$RUNNER_TEMP/pr-body.md"
+
+  # The checkout of a pull request is a merge commit whose parents are the branch it merges into (HEAD^1) and the
+  # pull request's last commit (HEAD^2), so HEAD^1...HEAD^2 is what the pull request changes.
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Check that the docs change with the code
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+          git diff --name-only HEAD^1...HEAD^2 > "$RUNNER_TEMP/changed.txt"
+          uv run --with pyyaml python .github/scripts/groundwork.py check-docs \
+            --body "$RUNNER_TEMP/pr-body.md" --changed "$RUNNER_TEMP/changed.txt"

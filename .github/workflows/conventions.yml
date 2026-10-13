@@ -1,0 +1,20 @@
+# The conventions file itself must stay well formed, and the generated files (the pull request template and the
+# issue forms) must match it, so a hand edit of a generated file or a typo in the conventions fails a pull request.
+name: conventions
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  conventions:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv run --with pyyaml python .github/scripts/groundwork.py validate
+      - run: uv run --with pyyaml python .github/scripts/groundwork.py render --check

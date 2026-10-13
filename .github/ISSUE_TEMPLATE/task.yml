@@ -1,0 +1,48 @@
+# Generated from .github/conventions.yml by `groundwork.py render`; edit the conventions, not this file.
+name: Task
+description: A piece of work for a maintainer or an agent
+title: 'Task: '
+labels:
+- task
+- S-needs-triage
+body:
+- type: markdown
+  attributes:
+    value: 'A task is written so that someone with no other context can do it: start with the problem.
+
+      '
+- type: textarea
+  id: summary
+  attributes:
+    label: Summary
+  validations:
+    required: true
+- type: dropdown
+  id: area
+  attributes:
+    label: Area
+    description: The part of Tether; the maintainer sets the matching label.
+    options:
+    - A-checkpoint
+    - A-fleet
+    - A-watch
+    - A-guards
+    - A-housekeeping
+    - A-conversation
+    - A-plugin
+  validations:
+    required: true
+- type: textarea
+  id: done
+  attributes:
+    label: What "done" means
+  validations:
+    required: true
+- type: textarea
+  id: steps
+  attributes:
+    label: Fix list or steps
+- type: textarea
+  id: blocked-by
+  attributes:
+    label: Blocked by
