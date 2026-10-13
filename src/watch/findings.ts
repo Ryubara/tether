@@ -69,14 +69,17 @@ export type AgentSeen = {
   /** When its last model request ended (or when watch first saw it, before any). */
   lastStepAt: number
   contextTokens?: number
+  /** Its live background tasks (read from its transcript), and when its last turn ended; see StoppedCandidate. */
+  tasks?: string[]
+  finishedAt?: number
 }
 
 /** What the agent guard needs besides the poller: the decisions made, and the thresholds fleet shares. */
-export type AgentGuard = { store: GuardStore; cacheMinutes: number; smallTokens: number }
+export type AgentGuard = { store: GuardStore; cacheMinutes: number; smallTokens: number; leadMinutes: number }
 
 /**
  * The agents poller's findings: running agents silent too long, agents past the context size and, with a
- * `guard`, stopped big agents nobody has decided about (retired or done) as their cache runs out.
+ * `guard`, stopped big agents nobody has dealt with as their cache runs out (see src/guards/agents.ts).
  */
 export function agentFindings(p: AgentsPoller, agents: AgentSeen[], now: number, guard?: AgentGuard): Finding[] {
   const out: Finding[] = []
@@ -92,7 +95,7 @@ export function agentFindings(p: AgentsPoller, agents: AgentSeen[], now: number,
     }
   }
   if (guard) {
-    const rules: AgentRules = { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, actAfterMinutes: p.actAfterMinutes }
+    const rules: AgentRules = { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, leadMinutes: guard.leadMinutes }
     for (const u of undecided(agents, guard.store, rules, now)) out.push({ key: `${u.id}|undecided`, text: u.text })
   }
   return out

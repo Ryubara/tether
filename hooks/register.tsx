@@ -10,8 +10,8 @@ import type { PrsPoller } from '../src/watch/config'
 import { DEFAULTS, mergeConfig, type FleetConfig } from '../src/fleet/config'
 import { coldGuard } from '../src/fleet/guard'
 import { recordStep, type Ledger } from '../src/fleet/ledger'
-import { buildRows, summary, tokens, type AgentLike, type RateLimit, type Row } from '../src/fleet/rows'
-import { lastRequest, metaDescription, subagentsDir } from '../src/fleet/transcript'
+import { buildRows, GUARD_MARK, summary, tokens, type AgentLike, type RateLimit, type Row } from '../src/fleet/rows'
+import { appendedText, lastRequest, liveTasks, metaDescription, scanTasks, subagentsDir } from '../src/fleet/transcript'
 import { Boxes, parseState, type WatchState } from '../src/fleet/boxes'
 import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type Poller, type WatchConfig } from '../src/watch/config'
@@ -20,9 +20,10 @@ import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type AgentSeen
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
-import { stopReason as agentStopReason, undecided, type Undecided } from '../src/guards/agents'
+import { decisionProblem, planActions, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
+import { CACHE_GUARD_DEFAULTS, mergeCacheGuard, type CacheGuardConfig } from '../src/guards/config'
 import { ACTIVE_RERUN, GH_FIELDS, fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
-import { pruneOwners, readStore, recordDecision, recordOwner, recordRerun, type GuardStore } from '../src/guards/store'
+import { pruneOwners, readStore, recordAction, recordDecision, recordOwner, recordRerun, type GuardStore } from '../src/guards/store'
 import { layered } from '../src/options/options'
 import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
 import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
@@ -251,7 +252,7 @@ function currentRows(now: number): Row[] {
       const stale = a.status === 'running' && end !== undefined && end >= (ledger.get(a.id)?.lastStepAt ?? 0) && now - end >= 30_000
       return stale ? { ...a, status: 'completed' } : a
     })
-  return buildRows(named, ledger, notes, now, cfg)
+  return buildRows(named, ledger, notes, now, cfg, Object.fromEntries(guardMarks))
 }
 
 const fleetStart = async ($: any, e: any, next: any): Promise<any> => {
@@ -497,6 +498,10 @@ async function agentsSeen($: any, now: number): Promise<AgentSeen[]> {
   agents = list as AgentLike[]
   await noteProjectDir($)
   await backfill($)
+  await loadTasks($)
+  // The background tasks of the agents that are not running: the ones that can wake themselves
+  const tasks = new Map<string, string[]>()
+  for (const a of list) if (a.status !== 'running' && a.status !== 'failed' && a.status !== 'killed') tasks.set(a.id, await tasksOf($, a.id, now))
   return list.map(a => {
     if (!firstSeen.has(a.id)) firstSeen.set(a.id, now)
     const s = steps.get(a.id)
@@ -507,6 +512,8 @@ async function agentsSeen($: any, now: number): Promise<AgentSeen[]> {
       label: a.name ?? a.description ?? a.type ?? a.id,
       lastStepAt: s?.at ?? l?.lastStepAt ?? firstSeen.get(a.id)!,
       ...(s ? { contextTokens: s.context } : l ? { contextTokens: l.contextTokens } : {}),
+      ...(finished.has(a.id) ? { finishedAt: finished.get(a.id)! } : {}),
+      ...(tasks.has(a.id) ? { tasks: tasks.get(a.id)! } : {}),
     }
   })
 }
@@ -522,10 +529,10 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
       try {
         const at = await $.clock.now()
         const seen = await agentsSeen($, at)
-        const guard = { store: await guardStore($), cacheMinutes: cfg.cacheTtlMinutes, smallTokens: cfg.bigContextTokens }
+        const guard = { store: await guardStore($), cacheMinutes: cfg.cacheTtlMinutes, smallTokens: cfg.bigContextTokens, leadMinutes: gCfg.leadMinutes }
         result = { findings: agentFindings(p, seen, at, guard) }
         // The Stop hook blocks over the same agents the poller tells
-        lastUndecided = undecided(seen, guard.store, { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, actAfterMinutes: p.actAfterMinutes }, at)
+        lastUndecided = undecided(seen, guard.store, agentRules(), at)
       } catch (err) {
         result = { error: String(err) }
       }
@@ -936,6 +943,218 @@ function localStamp(ms: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
+// ---- The agent guard's own actions ----
+// A stopped agent holding a big context loses its prompt cache `cacheTtlMinutes` after its last request. One with
+// live background work wakes itself when that reports, so waiting for the model to decide is not enough: every
+// minute a timer asks planActions (src/guards/agents.ts) what to do, and Tether does it through the plugin API:
+// `$.session.send` messages the agent (a keep-warm ping is a cache read; a handover request is the same read) and
+// `$.tool.call({ tool: 'TaskStop' })` stops the background tasks it leaves behind, only after it has stopped itself.
+// What the API cannot do (list an agent's tasks; know a message was acted on) is covered in the README's agent guard
+// section. When nothing here can act, the agent stays a finding and the Stop hook blocks, as before.
+
+let gCfg: CacheGuardConfig = CACHE_GUARD_DEFAULTS
+let guardTimer: { cancel: () => void } | undefined
+let guardTicking = false
+/** Live background tasks by agent id, from the rows appended to its conversation (the only per-agent source for a transcript too big to read). */
+const bgTasks = new Map<string, Set<string>>()
+let tasksLoaded = false
+/** A transcript larger than this is not read: `$.fs.read` rejects a file over 4 MiB. */
+const FS_READ_LIMIT = 4_000_000
+/** The task list read from a transcript, by agent, valid while the file's mtime stands. */
+const taskCache = new Map<string, { mtime: number; tasks: string[] }>()
+/** The flags the pane shows for what the guard did, by agent id. */
+const guardMarks = new Map<string, string[]>()
+/** What the guard did, newest last, for /tether-guards. */
+const guardNotes: string[] = []
+/** The last failure told per agent, so a persistent one is logged once. */
+const guardErrors = new Map<string, string>()
+/** Alerts already told (agent and text), so one that could not be saved is not told every tick. */
+const toldAlerts = new Set<string>()
+
+/** The thresholds the agent guard works to. */
+function agentRules(): AgentRules {
+  return { cacheMinutes: cfg.cacheTtlMinutes, smallTokens: cfg.bigContextTokens, leadMinutes: gCfg.leadMinutes }
+}
+
+/** Clock time `HH:MM` of an epoch ms. */
+function clockOf(ms: number): string {
+  return localStamp(ms).slice(11, 16)
+}
+
+/** Loads the persisted background tasks once. */
+async function loadTasks($: any): Promise<void> {
+  if (tasksLoaded) return
+  tasksLoaded = true
+  const saved = await $.store.get(`guards:tasks:${wcfg.storeName}`)
+  if (saved && typeof saved === 'object') {
+    for (const [id, list] of Object.entries(saved as Record<string, unknown>)) {
+      if (Array.isArray(list)) bgTasks.set(id, new Set(list.filter((t): t is string => typeof t === 'string')))
+    }
+  }
+}
+
+/** Notes the background tasks a row appended to a subagent's conversation starts or ends. */
+async function noteRow($: any, e: any): Promise<void> {
+  const id = e.agentId
+  if (typeof id !== 'string') return
+  const text = appendedText(e.message?.content)
+  if (!text.includes('in background with ID') && !text.includes('<task-id>')) return
+  await loadTasks($)
+  const live = bgTasks.get(id) ?? new Set<string>()
+  const before = [...live].join()
+  scanTasks(text, live)
+  if ([...live].join() === before) return
+  bgTasks.set(id, live)
+  await $.store.set(`guards:tasks:${wcfg.storeName}`, Object.fromEntries([...bgTasks].filter(([, t]) => t.size > 0).map(([k, t]) => [k, [...t]])))
+}
+
+/** The live background tasks of a subagent: its transcript when small enough to read, else what the appended rows showed. */
+async function tasksOf($: any, id: string, now: number): Promise<string[]> {
+  try {
+    const bases = await transcriptsOf($, id, now)
+    if (bases.length > 0) {
+      const file = bases[0] + '.jsonl'
+      const st = await $.fs.stat(file)
+      if (st.size <= FS_READ_LIMIT) {
+        const known = taskCache.get(id)
+        if (known && known.mtime === st.mtimeMs) return known.tasks
+        const tasks = liveTasks(String(await $.fs.read(file)))
+        taskCache.set(id, { mtime: st.mtimeMs, tasks })
+        return tasks
+      }
+    }
+  } catch {
+    // An unreadable transcript leaves the appended rows as the source
+  }
+  return [...(bgTasks.get(id) ?? [])]
+}
+
+/** What the guard did, as pane flags: pinged, asked to hand over, handed over. */
+function refreshMarks(store: GuardStore): void {
+  guardMarks.clear()
+  for (const [id, d] of Object.entries(store.decisions)) {
+    const act = store.actions[id]
+    if (d.decision === 'kept-warm') guardMarks.set(id, [`${GUARD_MARK}kept warm ${clockOf(d.atMs)}${act && act.warms > 1 ? ` (x${act.warms})` : ''}`])
+    else if (act?.handoverAt !== undefined) guardMarks.set(id, [`${GUARD_MARK}handed over ${clockOf(act.handoverAt)}`])
+  }
+  for (const [id, act] of Object.entries(store.actions)) {
+    if (act.handoverAt !== undefined && !guardMarks.has(id)) guardMarks.set(id, [`${GUARD_MARK}handover asked ${clockOf(act.handoverAt)}${act.alertedAt !== undefined ? ' LATE' : ''}`])
+  }
+}
+
+/** Tells the coordinator: a toast, a log line, a line for /tether-guards; an alert also wakes the model like a watch finding. */
+async function reportGuard($: any, text: string, now: number, alert?: { id: string }): Promise<void> {
+  guardNotes.push(`${clockOf(now)} ${text}`)
+  if (guardNotes.length > 30) guardNotes.shift()
+  $.ui.toast(`agent guard: ${text}`)
+  $.ui.log(`agent guard: ${text}`)
+  if (!alert || !wcfg.enabled) return
+  const add: Pending = { key: `${alert.id}|guard|${now}`, text, poller: 'agent-guard', title: 'Agent guard', wake: true, at: now }
+  await $.store.set(pendingKey(), [...(await getPending($)), add])
+  void deliver($)
+}
+
+/** Messages a subagent through the plugin API; the reason when it was not delivered. */
+async function sendToAgent($: any, id: string, text: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    const r = await $.session.send({ to: { agentId: id }, text })
+    return r?.isDelivered ? { ok: true } : { ok: false, reason: String(r?.reason ?? 'not delivered') }
+  } catch (err) {
+    return { ok: false, reason: String(err) }
+  }
+}
+
+/** Stops the background tasks with TaskStop; the problems (a task that is already gone is not one). */
+async function stopTasks($: any, tasks: string[]): Promise<string[]> {
+  const problemsOut: string[] = []
+  for (const t of tasks) {
+    try {
+      const r: any = await $.tool.call({ tool: 'TaskStop', task_id: t })
+      const why = r?.deny ?? (r?.isError ? (r?.text ?? 'error') : undefined)
+      if (why !== undefined && !/not found|no such|no task|not running|already/i.test(String(why))) problemsOut.push(`${t}: ${String(why).slice(0, 120)}`)
+    } catch (err) {
+      problemsOut.push(`${t}: ${String(err).slice(0, 120)}`)
+    }
+  }
+  return problemsOut
+}
+
+/** Says a failure once per new reason, per agent; the agent stays a finding and the Stop hook blocks. */
+function failedOnce($: any, id: string, text: string): void {
+  if (guardErrors.get(id) === text) return
+  guardErrors.set(id, text)
+  $.ui.log(`agent guard: ${text}`)
+}
+
+/** Carries out one planned action; the store changes only for what succeeded. */
+async function runPlan($: any, plan: Plan, now: number): Promise<void> {
+  const at = localStamp(now).replace('T', ' ').slice(0, 16)
+  const store = await guardStore($)
+  if (plan.kind === 'warm') {
+    const sent = await sendToAgent($, plan.id, gCfg.keepWarmText)
+    if (!sent.ok) return failedOnce($, plan.id, `keep-warm of ${plan.label} (${plan.id}) failed: ${sent.reason}`)
+    await saveGuardStore($, recordAction(recordDecision(store, plan.id, 'kept-warm', `Tether pinged it (${plan.count})`, at, now), plan.id, { warms: plan.count }))
+    await reportGuard($, `kept ${plan.label} (${plan.id}) warm (ping ${plan.count}); its background work goes on`, now)
+  } else if (plan.kind === 'handover') {
+    const sent = await sendToAgent($, plan.id, gCfg.handoverText)
+    if (!sent.ok) return failedOnce($, plan.id, `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`)
+    await saveGuardStore($, recordAction(store, plan.id, { handoverAt: now }))
+    await reportGuard($, `asked ${plan.label} (${plan.id}, ${tokens(plan.contextTokens)} context) to hand over and stop; its background tasks are stopped once it has`, now)
+  } else if (plan.kind === 'collect') {
+    if (plan.unknown) {
+      await saveGuardStore($, recordAction(store, plan.id, { stopFailedAt: now }))
+      return reportGuard($, `${plan.label} (${plan.id}) handed over but is still waiting on background work Tether cannot identify; TaskStop its tasks yourself (see /tasks), then record it as retired`, now, { id: plan.id })
+    }
+    const failed = await stopTasks($, plan.tasks)
+    if (failed.length > 0) {
+      await saveGuardStore($, recordAction(store, plan.id, { stopFailedAt: now }))
+      return reportGuard($, `${plan.label} (${plan.id}) handed over but TaskStop failed for ${failed.join('; ')}; stop them yourself, then record it as retired`, now, { id: plan.id })
+    }
+    const n = plan.tasks.length
+    await saveGuardStore($, recordDecision(store, plan.id, 'retired', `handed over; ${n} background task${n === 1 ? '' : 's'} stopped`, at, now))
+    await reportGuard($, `${plan.label} (${plan.id}) handed over and is retired; stopped ${n} background task${n === 1 ? '' : 's'}${n ? ` (${plan.tasks.join(', ')})` : ''}. Start a fresh agent from its STATUS.md`, now, { id: plan.id })
+  } else {
+    await saveGuardStore($, recordAction(store, plan.id, { alertedAt: now }))
+    if (toldAlerts.has(`${plan.id}|${plan.text.slice(0, 40)}`)) return
+    toldAlerts.add(`${plan.id}|${plan.text.slice(0, 40)}`)
+    await reportGuard($, plan.text, now, { id: plan.id })
+  }
+  guardErrors.delete(plan.id)
+}
+
+/** Recomputes who needs a decision (what the Stop hook blocks over) from the engine's list, tasks and the store. */
+async function refreshUndecided($: any): Promise<Undecided[]> {
+  const now = await $.clock.now()
+  const seen = await agentsSeen($, now)
+  const store = await guardStore($)
+  refreshMarks(store)
+  lastUndecided = undecided(seen, store, agentRules(), now)
+  return lastUndecided
+}
+
+/** One guard tick: refresh the findings, then do what planActions says; never overlaps itself. */
+async function guardTick($: any): Promise<void> {
+  if (guardTicking || !cfg.enabled) return
+  guardTicking = true
+  try {
+    const now = await $.clock.now()
+    const seen = await agentsSeen($, now)
+    if (gCfg.auto) {
+      const store = await guardStore($)
+      const auto = { handoverTokens: gCfg.handoverTokens, handoverWaitMinutes: gCfg.handoverWaitMinutes, keepWarmMax: gCfg.keepWarmMax }
+      const plans = planActions(seen, store, agentRules(), auto, now)
+      for (const plan of plans) await runPlan($, plan, now)
+    }
+    const store = await guardStore($)
+    refreshMarks(store)
+    lastUndecided = undecided(seen, store, agentRules(), now)
+  } catch (err) {
+    failedOnce($, '*', `the tick failed: ${err}`)
+  } finally {
+    guardTicking = false
+  }
+}
+
 /** Open PRs whose idle worktree holds commits origin lacks (the poller's `worktrees` setting). */
 async function unpushedIn($: any, p: PrsPoller, heads: Map<number, { branch: string; sha: string }>): Promise<Problem[]> {
   const out: Problem[] = []
@@ -1015,12 +1234,12 @@ async function registerGuardTools($: any): Promise<void> {
     })
     await $.tool.register({
       name: TOOL_AGENT,
-      description: 'Record the decision about a stopped subagent that holds a big context: "retired" (stopped, a fresh agent will take over) or "done" (its work is finished). Tether\'s agent guard keeps blocking the end of a turn until each such agent is decided before its prompt cache expires.',
+      description: 'Record the decision about a stopped subagent that holds a big context: "kept-warm" (you sent it a short message, which re-arms its prompt cache; the warning returns after the next expiry window), "retired" (stopped, a fresh agent will take over) or "done" (its work is finished). "retired" and "done" are refused while the agent runs or has live background tasks (TaskStop them first, after the agent has handed over). Tether\'s agent guard acts by itself before the cache expires and keeps blocking the end of a turn until each such agent is dealt with.',
       inputSchema: {
         type: 'object',
         properties: {
           id: { type: 'string', description: 'The agent id' },
-          decision: { type: 'string', enum: ['retired', 'done'] },
+          decision: { type: 'string', enum: ['kept-warm', 'retired', 'done'] },
           note: { type: 'string' },
         },
         required: ['id', 'decision'],
@@ -1047,13 +1266,29 @@ async function prOwnerCall($: any, e: any): Promise<any> {
   return toolText(`#${pr} ${e.kind === 'waive' ? 'waived' : 'assigned to ' + who} for ${hours} h${cause ? ` (cause ${cause})` : ''}.`)
 }
 
-/** Serves agent_decision: records that a stopped agent is retired or done. */
+/**
+ * Serves agent_decision: records that a stopped agent is kept warm, retired or done. Retired and done are refused
+ * while the agent runs or has live background work, because it would wake itself and re-write its cache.
+ */
 async function agentDecisionCall($: any, e: any): Promise<any> {
   if (typeof e.id !== 'string' || e.id.trim() === '') return { deny: 'id must be an agent id' }
-  if (e.decision !== 'retired' && e.decision !== 'done') return { deny: 'decision must be "retired" or "done"' }
+  if (e.decision !== 'retired' && e.decision !== 'done' && e.decision !== 'kept-warm') return { deny: 'decision must be "kept-warm", "retired" or "done"' }
+  const id = e.id.trim()
   const now = await $.clock.now()
-  await saveGuardStore($, recordDecision(await guardStore($), e.id.trim(), e.decision, String(e.note ?? ''), localStamp(now).replace('T', ' ').slice(0, 16)))
-  return toolText(`${e.id.trim()} recorded as ${e.decision}.`)
+  let known: AgentSeen | undefined
+  try {
+    known = (await agentsSeen($, now)).find(a => a.id === id || a.label === id)
+  } catch {
+    // Without the engine's list nothing can be checked; the decision is recorded as given
+  }
+  const problem = decisionProblem(e.decision, known)
+  if (problem) return { deny: `agent_decision refused: ${problem}` }
+  const key = known?.id ?? id
+  const store = await guardStore($)
+  const recorded = recordDecision(store, key, e.decision, String(e.note ?? ''), localStamp(now).replace('T', ' ').slice(0, 16), now)
+  await saveGuardStore($, e.decision === 'kept-warm' ? recordAction(recorded, key, { warms: (store.actions[key]?.warms ?? 0) + 1 }) : recorded)
+  await refreshUndecided($).catch(() => lastUndecided)
+  return toolText(`${id} recorded as ${e.decision}.`)
 }
 
 /** What /tether-guards prints: the PR problems nobody owns, the owners and waivers, the agents awaiting a decision. */
@@ -1068,9 +1303,10 @@ async function guardsReport($: any): Promise<string> {
   for (const [pr, o] of Object.entries(store.owners)) {
     if (o.until > now) lines.push(`owner #${pr}: ${o.who}${o.cause ? ` (${o.cause})` : ''} for ${Math.round((o.until - now) / 3_600_000)} h more, ${o.note}`)
   }
-  const waiting = lastUndecided.filter(u => !(u.id in store.decisions))
-  lines.push(`agents awaiting a decision: ${waiting.length}`)
-  for (const u of waiting) lines.push(`- ${u.text}`)
+  lines.push(`agents awaiting a decision: ${lastUndecided.length}`)
+  for (const u of lastUndecided) lines.push(`- ${u.text}`)
+  lines.push(`agent guard: ${gCfg.auto ? 'acts by itself' : 'asks only'}, ${gCfg.leadMinutes} min before the cache expires; hands over from ${tokens(gCfg.handoverTokens)}`)
+  for (const n of guardNotes.slice(-10)) lines.push(`- ${n}`)
   return lines.join('\n')
 }
 
@@ -1091,6 +1327,10 @@ async function guardsStart($: any): Promise<void> {
   hkCfg = mergeHousekeeping(layered(options, 'housekeeping', root?.housekeeping))
   convCfg = mergeConversations(layered(options, 'conversations', root?.conversations))
   stopCfg = mergeStop(layered(options, 'stop', root?.stop))
+  gCfg = mergeCacheGuard(layered(options, 'cacheGuard', root?.cacheGuard))
+  // The guard acts on its own clock, whether or not a poller is configured
+  guardTimer?.cancel()
+  guardTimer = $.clock.every(60_000, () => guardTick($)) as any
 }
 
 /** The handoff as session-start context when `checkpoint.injectHandoff` is on and the file exists; undefined otherwise. */
@@ -1176,6 +1416,17 @@ export const register: Register = (on, opts) => {
     return fleetStart($, e, (e2: any) => watchStart($, e2, next))
   })
 
+  // The background tasks a subagent starts and ends are in the rows appended to its conversation.
+  on('session.append', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      await noteRow($, e)
+    } catch {
+      // Only the task list is lost
+    }
+    return r
+  })
+
   // The model records an owner, a waiver or a decision with these tools.
   on('tool.call', { tool: `mcp__tether__${TOOL_PR}` }, async ($, e) => prOwnerCall($, e))
   on('tool.call', { tool: `mcp__tether__${TOOL_AGENT}` }, async ($, e) => agentDecisionCall($, e))
@@ -1188,9 +1439,11 @@ export const register: Register = (on, opts) => {
     if (!stopCfg.enabled) return r
     const now = await $.clock.now()
     const store = await guardStore($)
+    // Look again, so a ping or a decision since the last tick counts
+    const open = await refreshUndecided($).catch(() => lastUndecided)
     const reasons = [
       unowned(lastProblems, store, now).length > 0 ? prStopReason(unowned(lastProblems, store, now)) : '',
-      lastUndecided.some(u => !(u.id in store.decisions)) ? agentStopReason(lastUndecided.filter(u => !(u.id in store.decisions))) : '',
+      open.length > 0 ? agentStopReason(open) : '',
     ].filter(Boolean)
     if (reasons.length === 0) {
       stopState = undefined

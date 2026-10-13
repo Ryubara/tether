@@ -2,9 +2,12 @@
 // owners and waivers, and the stopped-agent decisions.
 import { expect, test } from 'claude-code/testing'
 
-import { stopReason as agentStop, undecided } from '../../src/guards/agents'
+import { DEFAULTS } from '../../src/fleet/config'
+import { coldGuard } from '../../src/fleet/guard'
+import { actAfterMinutes, decisionProblem, planActions, stopReason as agentStop, undecided, type StoppedCandidate } from '../../src/guards/agents'
+import { CACHE_GUARD_DEFAULTS, mergeCacheGuard } from '../../src/guards/config'
 import { fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason, toldProblems, unowned, unpushedProblem } from '../../src/guards/prs'
-import { EMPTY_STORE, ownerCovers, pruneOwners, readStore, recordDecision, recordOwner, recordRerun } from '../../src/guards/store'
+import { EMPTY_STORE, ownerCovers, pruneOwners, readStore, recordAction, recordDecision, recordOwner, recordRerun } from '../../src/guards/store'
 import { parseConfig, type AgentsPoller, type PrsPoller } from '../../src/watch/config'
 import { agentFindings } from '../../src/watch/findings'
 
@@ -72,7 +75,7 @@ test('readStore keeps well-formed records and drops the rest', async () => {
 })
 
 test('undecided lists stopped big agents past the act-after time, until decided', async () => {
-  const rules = { cacheMinutes: 60, smallTokens: 60_000, actAfterMinutes: 45 }
+  const rules = { cacheMinutes: 60, smallTokens: 60_000, leadMinutes: 15 }
   const agent = (id: string, status: string, minutes: number, ctx: number) => ({ id, status, label: id, lastStepAt: NOW - minutes * MIN, contextTokens: ctx })
   const agents = [
     agent('soon', 'completed', 50, 200_000),
@@ -98,7 +101,7 @@ test('undecided lists stopped big agents past the act-after time, until decided'
 test('the agents poller adds undecided agents when given the guard, and prs pollers parse', async () => {
   const { config, problems } = parseConfig({
     pollers: [
-      { id: 'agents', kind: 'agents', actAfterMinutes: 30 },
+      { id: 'agents', kind: 'agents', silentMinutes: 30 },
       { id: 'prs', kind: 'prs', command: ['x'], requireAutoMerge: true, worktrees: 'wt', assignHours: 2 },
       { id: 'bad', kind: 'prs', command: [] },
     ],
@@ -106,13 +109,15 @@ test('the agents poller adds undecided agents when given the guard, and prs poll
   expect(problems).toEqual(['bad: command must be a non-empty list of strings'])
   const agents = config.pollers[0] as AgentsPoller
   const prs = config.pollers[1] as PrsPoller
-  expect(agents.actAfterMinutes).toBe(30)
+  expect(agents.silentMinutes).toBe(30)
+  // The removed actAfterMinutes is read without error and ignored (the lead time is cacheGuard.leadMinutes)
+  expect(parseConfig({ pollers: [{ id: 'agents', kind: 'agents', actAfterMinutes: 5 }] }).problems).toEqual([])
   // The removed forgetAgentMinutes is read without error and ignored
   expect(parseConfig({ pollers: [{ id: 'agents', kind: 'agents', forgetAgentMinutes: 5 }] }).problems).toEqual([])
   expect([prs.command, prs.requireAutoMerge, prs.ignoreDrafts, prs.worktrees, prs.assignHours, prs.rerunHours, prs.stuckMinutes, prs.everySeconds]).toEqual([['x'], true, true, 'wt', 2, 3, 90, 300])
   const seen = [{ id: 'a1', status: 'completed', label: 'worker', lastStepAt: NOW - 50 * MIN, contextTokens: 100_000 }]
   expect(agentFindings(agents, seen, NOW)).toEqual([])
-  expect(agentFindings(agents, seen, NOW, { store: EMPTY_STORE, cacheMinutes: 60, smallTokens: 60_000 }).map(f => f.key)).toEqual(['a1|undecided'])
+  expect(agentFindings(agents, seen, NOW, { store: EMPTY_STORE, cacheMinutes: 60, smallTokens: 60_000, leadMinutes: 15 }).map(f => f.key)).toEqual(['a1|undecided'])
 })
 
 test('rerunsFromHealth reads well-formed entries and rerunInfo makes information lines that never block', async () => {
@@ -140,4 +145,120 @@ test('a recorded rerun owns a failed-checks problem only for the checks it reran
   expect(unowned([{ ...failed, extra: '' }], store, NOW + MIN).length).toBe(1)
   expect(Object.keys(pruneOwners(store, NOW + 4 * 60 * MIN).reruns)).toEqual([])
   expect(readStore(JSON.parse(JSON.stringify(store))).reruns['7']?.checks).toEqual(['a', 'b', 'c'])
+})
+
+const RULES_30 = { cacheMinutes: 60, smallTokens: 60_000, leadMinutes: 20 }
+const AUTO = { handoverTokens: 250_000, handoverWaitMinutes: 10, keepWarmMax: 3 }
+const waiting = (id: string, minutes: number, ctx: number, over: Partial<StoppedCandidate> = {}): StoppedCandidate => ({ id, status: 'waiting', label: id, lastStepAt: NOW - minutes * MIN, contextTokens: ctx, tasks: ['t1'], ...over })
+
+test('the lead is 20 minutes by default and never more than half a short cache', async () => {
+  expect(actAfterMinutes(RULES_30)).toBe(40)
+  expect(actAfterMinutes({ ...RULES_30, cacheMinutes: 5 })).toBe(2.5)
+  expect(undecided([waiting('a', 39, 100_000)], EMPTY_STORE, RULES_30, NOW)).toEqual([])
+  const [due] = undecided([waiting('a', 41, 100_000)], EMPTY_STORE, RULES_30, NOW)
+  expect(due?.text).toContain('1 live background task (it wakes itself when they report)')
+  expect(due?.text).toContain('cache expires in ~19 min')
+  // Waiting in the engine's status only (no task ids known) is still flagged as background work
+  expect(undecided([waiting('b', 41, 100_000, { tasks: undefined })], EMPTY_STORE, RULES_30, NOW)[0]?.text).toContain('waiting on background work')
+  // A stopped agent with an idle status is guarded too
+  expect(undecided([waiting('c', 41, 100_000, { status: 'idle', tasks: [] })], EMPTY_STORE, RULES_30, NOW).length).toBe(1)
+})
+
+test('kept-warm quiets the agent for one window from the later of its last activity and the record; retired is final', async () => {
+  const a = waiting('a', 45, 100_000)
+  const kept = recordDecision(EMPTY_STORE, 'a', 'kept-warm', 'pinged', 't', NOW - 5 * MIN)
+  // Pinged 5 minutes ago: quiet until 40 minutes after the ping
+  expect(undecided([a], kept, RULES_30, NOW)).toEqual([])
+  expect(undecided([a], kept, RULES_30, NOW + 34 * MIN)).toEqual([])
+  expect(undecided([a], kept, RULES_30, NOW + 36 * MIN).length).toBe(1)
+  // The ping woke the agent, so its activity is newer than the record: the window starts there
+  const active = waiting('a', 3, 100_000)
+  expect(undecided([active], kept, RULES_30, NOW + 36 * MIN)).toEqual([])
+  expect(undecided([active], kept, RULES_30, NOW + 38 * MIN).length).toBe(1)
+  expect(undecided([a], recordDecision(EMPTY_STORE, 'a', 'retired', '', 't', NOW - 5 * MIN), RULES_30, NOW + 600 * MIN)).toEqual([])
+  expect(readStore(JSON.parse(JSON.stringify(kept))).decisions['a']).toEqual({ decision: 'kept-warm', note: 'pinged', at: 't', atMs: NOW - 5 * MIN })
+})
+
+test('planActions keeps a small waiting agent warm, hands a big one over, and leaves an agent with nothing to wake it to the model', async () => {
+  const plan = (agents: StoppedCandidate[], store = EMPTY_STORE, now = NOW) => planActions(agents, store, RULES_30, AUTO, now).map(p => `${p.kind}:${p.id}`)
+  expect(plan([waiting('small', 41, 100_000), waiting('big', 41, 300_000), waiting('early', 30, 300_000), waiting('tiny', 41, 1_000)])).toEqual(['warm:small', 'handover:big'])
+  expect(plan([{ id: 'done', status: 'completed', label: 'done', lastStepAt: NOW - 50 * MIN, contextTokens: 300_000 }])).toEqual([])
+  expect(plan([{ id: 'busy', status: 'running', label: 'busy', lastStepAt: NOW - 50 * MIN, contextTokens: 300_000, tasks: ['t'] }])).toEqual([])
+  // Once pinged it is quiet; the count goes up with the next window
+  const pinged = recordAction(recordDecision(EMPTY_STORE, 'small', 'kept-warm', '', 't', NOW), 'small', { warms: 1 })
+  expect(plan([waiting('small', 41, 100_000)], pinged)).toEqual([])
+  expect(planActions([waiting('small', 41, 100_000, { lastStepAt: NOW })], pinged, RULES_30, AUTO, NOW + 41 * MIN)).toEqual([{ kind: 'warm', id: 'small', label: 'small', count: 2 }])
+  // Too many pings: the model is told, once
+  const worn = recordAction(EMPTY_STORE, 'small', { warms: 3 })
+  expect(plan([waiting('small', 41, 100_000)], worn)).toEqual(['alert:small'])
+  expect(plan([waiting('small', 41, 100_000)], recordAction(worn, 'small', { alertedAt: NOW }))).toEqual([])
+  // An expired cache is never pinged: that would be the re-write itself
+  expect(plan([waiting('late', 65, 100_000)])).toEqual(['alert:late'])
+})
+
+test('a handover is collected once the agent has stopped, alerted when late, and Tether keeps the agent out of the findings while it works', async () => {
+  const asked = recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 3 * MIN })
+  const plan = (a: StoppedCandidate, store = asked, now = NOW) => planActions([a], store, RULES_30, AUTO, now)
+  // Still running its handover, or no turn ended since the ask: nothing yet
+  expect(plan(waiting('big', 41, 300_000, { status: 'running', lastStepAt: NOW - MIN }))).toEqual([])
+  expect(plan(waiting('big', 41, 300_000, { finishedAt: NOW - 10 * MIN, lastStepAt: NOW - 10 * MIN }))).toEqual([])
+  // It stopped after the ask: its leftover tasks are collected
+  const done = waiting('big', 41, 300_000, { finishedAt: NOW - MIN, lastStepAt: NOW - 2 * MIN, tasks: ['t1', 't2'] })
+  expect(plan(done)).toEqual([{ kind: 'collect', id: 'big', label: 'big', tasks: ['t1', 't2'], unknown: false }])
+  // Waiting on background work whose ids are unknown is said, not guessed
+  expect(plan({ ...done, tasks: [] })).toEqual([{ kind: 'collect', id: 'big', label: 'big', tasks: [], unknown: true }])
+  // After a failed stop it is not retried
+  expect(plan(done, recordAction(asked, 'big', { stopFailedAt: NOW }))).toEqual([])
+  // Late: an alert, once, naming that it is not stopped
+  const late = waiting('big', 55, 300_000, { status: 'running' })
+  const [alert] = plan(late, recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 11 * MIN }))
+  expect(alert).toMatchObject({ kind: 'alert' })
+  expect((alert as { text: string }).text).toContain('NOT stopped')
+  expect(plan(late, recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 11 * MIN, alertedAt: NOW }))).toEqual([])
+  // Findings: not while Tether has it in hand; yes once late or when the stop failed
+  const idle = waiting('big', 45, 300_000)
+  expect(undecided([idle], asked, RULES_30, NOW)).toEqual([])
+  expect(undecided([idle], recordAction(asked, 'big', { alertedAt: NOW }), RULES_30, NOW)[0]?.text).toContain('NOT stopped')
+  expect(undecided([{ ...idle, status: 'running' }], recordAction(asked, 'big', { alertedAt: NOW }), RULES_30, NOW).length).toBe(1)
+  expect(undecided([idle], recordAction(asked, 'big', { stopFailedAt: NOW }), RULES_30, NOW)[0]?.text).toContain('could not be stopped')
+  // Retired ends it all
+  const retired = recordDecision(asked, 'big', 'retired', '', 't', NOW)
+  expect(plan(done, retired)).toEqual([])
+  expect(undecided([idle], recordAction(retired, 'big', { alertedAt: NOW }), RULES_30, NOW)).toEqual([])
+})
+
+test('decisionProblem refuses retired and done for an agent that is running or will wake itself, and says TaskStop it first', async () => {
+  expect(decisionProblem('retired', { status: 'running', label: 'w' })).toContain('TaskStop it first')
+  expect(decisionProblem('done', { status: 'running', label: 'w' })).toContain('still running')
+  expect(decisionProblem('retired', { status: 'completed', label: 'w', tasks: ['b1'] })).toMatch(/1 live background task \(b1\).*TaskStop it first/)
+  expect(decisionProblem('done', { status: 'idle', label: 'w', tasks: ['b1', 'b2'] })).toMatch(/2 live background tasks.*TaskStop them first/)
+  expect(decisionProblem('retired', { status: 'waiting', label: 'w' })).toContain('TaskStop it first')
+  expect(decisionProblem('retired', { status: 'completed', label: 'w', tasks: [] })).toBeUndefined()
+  // Kept-warm is always allowed, and an agent the engine does not list is not judged
+  expect(decisionProblem('kept-warm', { status: 'running', label: 'w' })).toBeUndefined()
+  expect(decisionProblem('retired', undefined)).toBeUndefined()
+})
+
+test('the blocking reason names the two ways out, and the store keeps the actions', async () => {
+  const text = agentStop([{ id: 'a', text: 'a: stopped 45 min' }])
+  expect(text).toMatch(/keep it warm.*SendMessage.*kept-warm/)
+  expect(text).toMatch(/hand it over and stop it.*TaskStop.*retired/)
+  const store = recordAction(recordAction(EMPTY_STORE, 'a', { handoverAt: 5 }), 'a', { warms: 2, alertedAt: 9 })
+  expect(readStore(JSON.parse(JSON.stringify(store))).actions['a']).toEqual({ warms: 2, handoverAt: 5, alertedAt: 9 })
+  expect(readStore({ actions: { x: { warms: 'many' }, y: { warms: 1, handoverAt: 'soon' } } }).actions).toEqual({ y: { warms: 1 } })
+})
+
+test('mergeCacheGuard reads the section over the defaults and ignores what is not valid', async () => {
+  expect(mergeCacheGuard(undefined)).toEqual(CACHE_GUARD_DEFAULTS)
+  expect(CACHE_GUARD_DEFAULTS).toMatchObject({ auto: true, leadMinutes: 20, handoverTokens: 250_000, handoverWaitMinutes: 10 })
+  expect(mergeCacheGuard({ auto: false, leadMinutes: 30, handoverTokens: -1, keepWarmMax: 2.7, keepWarmText: ' ping ', handoverText: '' })).toMatchObject({ auto: false, leadMinutes: 30, handoverTokens: 250_000, keepWarmMax: 2, keepWarmText: 'ping' })
+  expect(CACHE_GUARD_DEFAULTS.handoverText).toMatch(/Commit your work, update STATUS\.md.*next exact command.*stop.*Do not start new work/)
+})
+
+test('the cold guard refuses a decided agent but not a kept-warm one', async () => {
+  const input = { to: 'a1', message: 'go' }
+  const agents = [{ id: 'a1', status: 'completed', description: 'd' }]
+  const ledger = new Map()
+  expect(coldGuard(input, agents, ledger, NOW, DEFAULTS, new Map(), recordDecision(EMPTY_STORE, 'a1', 'kept-warm', '', 't', NOW).decisions)).toBeUndefined()
+  expect(coldGuard(input, agents, ledger, NOW, DEFAULTS, new Map(), recordDecision(EMPTY_STORE, 'a1', 'retired', '', 't', NOW).decisions)).toContain('decided retired')
 })

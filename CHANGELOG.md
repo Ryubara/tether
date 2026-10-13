@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.0-alpha.20
+
+- Added: the agent guard acts by itself. Once a minute, `cacheGuard.leadMinutes` (default 20, at most half the cache
+  lifetime) before a stopped agent's prompt cache expires, a stopped agent with background work (status `waiting`,
+  or live tasks) is sent a short keep-warm message (`$.session.send`; the reply is a cache read), or, from
+  `cacheGuard.handoverTokens` (default 250k), a handover request (commit, update `STATUS.md`, list background jobs and
+  result files, the next command, then stop). After a handover Tether stops the background tasks the agent left
+  behind (`TaskStop`) and records it `retired`. An agent that does not finish within `cacheGuard.handoverWaitMinutes`
+  (10), tasks `TaskStop` would not stop, a cache that expired before the guard could act, and more than
+  `cacheGuard.keepWarmMax` (12) pings alert the model (toast, log, a wake prompt) and are never stopped silently.
+  `cacheGuard.auto` off keeps only the blocking guard. Seven new options (51 in all), a `cacheGuard` config section,
+  `guard ...` flags in the fleet pane and an action list in `/tether-guards`.
+- Added: `mcp__tether__agent_decision` takes `kept-warm`: the agent was pinged; the warning is quiet for one expiry
+  window counted from the later of its last activity and the record. A kept-warm agent can still be messaged.
+- Changed: `retired` and `done` are refused while the agent is running or has live background work ("TaskStop it
+  first"): it would wake itself and re-write its cache. Tether reads the task ids from the rows appended to the
+  agent's conversation (`session.append`) and from its transcript when under 4 MB.
+- Changed: the Stop hook looks again at the agents when it runs, and its message names the two ways out: keep warm
+  (send a message, record `kept-warm`), or hand over and stop (`TaskStop`, then `retired`). An idle agent is guarded
+  like a completed or waiting one.
+- Removed: the agents poller's `actAfterMinutes` (default 45). The lead time is `cacheGuard.leadMinutes`
+  (`cacheTtlMinutes` less 20 by default); a config that still sets it is read without error and the value is ignored.
+
 ## 1.0.0-alpha.19
 
 - Changed: the agent guard is one rule. A stopped agent with a big context (`fleet.bigContextTokens`) idle for

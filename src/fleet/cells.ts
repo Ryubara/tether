@@ -1,7 +1,7 @@
 // One pane row as cells with a colour each: what the pane draws, and (joined) what /tether-fleet text prints.
 
 import type { FleetConfig } from './config'
-import { BIG_WAIT, tokens, type Row } from './rows'
+import { BIG_WAIT, GUARD_MARK, tokens, type Row } from './rows'
 
 /** The colour names the pane uses, each overridable in the config's `colors`. */
 export type Palette = {
@@ -68,7 +68,7 @@ export function stateEmoji(state: string): string {
 
 /** A flag's emoji: a cold wake's cost, a context to retire, tokens already wasted. */
 function flagEmoji(flag: string): string {
-  return flag.startsWith('wake≈') ? '🧊' : flag.endsWith(' retire') ? '🔁' : flag === BIG_WAIT ? '🛑' : '💸'
+  return flag.startsWith('wake≈') ? '🧊' : flag.endsWith(' retire') ? '🔁' : flag === BIG_WAIT ? '🛑' : flag.startsWith(GUARD_MARK) ? '🛡️' : '💸'
 }
 
 /** The header row: each column's name, padded as the rows are. */
@@ -132,6 +132,7 @@ export function legend(rows: Row[], cfg: FleetConfig): string | undefined {
   if (flags.some(f => f.startsWith('wake≈'))) parts.push('wake≈N: cache expired, waking it re-writes N tokens to the cache')
   if (flags.some(f => f.endsWith(' retire'))) parts.push(`≥${tokens(cfg.retireContextTokens)} retire: context past the retire line`)
   if (flags.includes(BIG_WAIT)) parts.push('BIG-WAIT: a big context that is only waiting; retire it and start a small successor from its status notes')
+  if (flags.some(f => f.startsWith(GUARD_MARK))) parts.push('guard …: the agent guard acted by itself (kept the agent warm, or asked it to hand over)')
   if (flags.some(f => f.startsWith('WASTED'))) parts.push('WASTED N: tokens already re-written on cold wakes')
   return parts.length ? parts.join(' · ') : undefined
 }

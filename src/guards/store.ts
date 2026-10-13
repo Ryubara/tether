@@ -1,5 +1,5 @@
-// The guards' one store: who owns each open-PR problem, and what was decided about each stopped agent.
-// Both are "somebody has dealt with this" records, so both live in one value kept in $.store.
+// The guards' one store: who owns each open-PR problem, what was decided about each stopped agent, and what
+// Tether itself did for it. All are "somebody has dealt with this" records, so they live in one value kept in $.store.
 
 /** A PR's owner (someone dispatched to fix it) or a waiver (a known wait), valid until `until`. */
 export type Owner = {
@@ -14,8 +14,24 @@ export type Owner = {
   cause?: string
 }
 
-/** What was decided about a stopped agent with a big context. */
-export type Decision = { decision: 'retired' | 'done'; note: string; at: string }
+/**
+ * What was decided about a stopped agent with a big context. `retired` and `done` are final (a decided agent is
+ * never woken); `kept-warm` says the agent was pinged and only quiets the guard for one expiry window, measured
+ * from the later of the agent's last activity and `atMs`, so the agent stays wakeable.
+ */
+export type Decision = { decision: 'retired' | 'done' | 'kept-warm'; note: string; at: string; /** Epoch ms of the record; 0 when unknown (an older store). */ atMs: number }
+
+/** What Tether itself did about a stopped agent (the guard's automatic actions). */
+export type AgentAction = {
+  /** Keep-warm messages sent so far. */
+  warms: number
+  /** When the handover message was sent; absent: none yet. */
+  handoverAt?: number
+  /** When the coordinator was alerted (a late handover, or too many keep-warms); it is alerted once. */
+  alertedAt?: number
+  /** When stopping the agent's leftover background tasks failed; Tether does not retry, the coordinator decides. */
+  stopFailedAt?: number
+}
 
 /** A rerun of a PR's failed checks that the project's health command reported making; it owns those checks until `until`. */
 export type RerunRecord = {
@@ -35,13 +51,15 @@ export type GuardStore = {
   reruns: Record<string, RerunRecord>
   /** By agent id. */
   decisions: Record<string, Decision>
+  /** By agent id: what the guard did by itself. */
+  actions: Record<string, AgentAction>
 }
 
-export const EMPTY_STORE: GuardStore = { owners: {}, reruns: {}, decisions: {} }
+export const EMPTY_STORE: GuardStore = { owners: {}, reruns: {}, decisions: {}, actions: {} }
 
 /** Reads a stored value into a GuardStore, dropping anything of the wrong shape. */
 export function readStore(raw: unknown): GuardStore {
-  const out: GuardStore = { owners: {}, reruns: {}, decisions: {} }
+  const out: GuardStore = { owners: {}, reruns: {}, decisions: {}, actions: {} }
   if (raw === null || typeof raw !== 'object') return out
   const r = raw as Record<string, unknown>
   for (const [k, v] of Object.entries((r.owners as object) ?? {})) {
@@ -58,7 +76,20 @@ export function readStore(raw: unknown): GuardStore {
   }
   for (const [k, v] of Object.entries((r.decisions as object) ?? {})) {
     const d = v as Partial<Decision> | null
-    if (d && (d.decision === 'retired' || d.decision === 'done')) out.decisions[k] = { decision: d.decision, note: String(d.note ?? ''), at: String(d.at ?? '') }
+    if (d && (d.decision === 'retired' || d.decision === 'done' || d.decision === 'kept-warm')) {
+      out.decisions[k] = { decision: d.decision, note: String(d.note ?? ''), at: String(d.at ?? ''), atMs: typeof d.atMs === 'number' && Number.isFinite(d.atMs) ? d.atMs : 0 }
+    }
+  }
+  for (const [k, v] of Object.entries((r.actions as object) ?? {})) {
+    const a = v as Partial<AgentAction> | null
+    if (!a || typeof a.warms !== 'number') continue
+    const time = (t: unknown) => (typeof t === 'number' && Number.isFinite(t) ? t : undefined)
+    out.actions[k] = {
+      warms: a.warms,
+      ...(time(a.handoverAt) !== undefined ? { handoverAt: time(a.handoverAt) } : {}),
+      ...(time(a.alertedAt) !== undefined ? { alertedAt: time(a.alertedAt) } : {}),
+      ...(time(a.stopFailedAt) !== undefined ? { stopFailedAt: time(a.stopFailedAt) } : {}),
+    }
   }
   return out
 }
@@ -69,9 +100,14 @@ export function recordOwner(store: GuardStore, pr: number, who: string, hours: n
   return { ...store, owners: { ...store.owners, [String(pr)]: owner } }
 }
 
-/** The store with a decision recorded for an agent. */
-export function recordDecision(store: GuardStore, id: string, decision: Decision['decision'], note: string, at: string): GuardStore {
-  return { ...store, decisions: { ...store.decisions, [id]: { decision, note, at } } }
+/** The store with a decision recorded for an agent (`atMs`: when, as epoch ms). */
+export function recordDecision(store: GuardStore, id: string, decision: Decision['decision'], note: string, at: string, atMs = 0): GuardStore {
+  return { ...store, decisions: { ...store.decisions, [id]: { decision, note, at, atMs } } }
+}
+
+/** The store with an agent's action record changed by `change` (a new record starts with no warms). */
+export function recordAction(store: GuardStore, id: string, change: Partial<AgentAction>): GuardStore {
+  return { ...store, actions: { ...store.actions, [id]: { warms: 0, ...store.actions[id], ...change } } }
 }
 
 /** Whether an owner record is current and covers `cause` (one with no cause covers every cause). */

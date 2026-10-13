@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.19",
+  "version": "1.0.0-alpha.20",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -86,7 +86,7 @@
     "fleetBigContextTokens": {
       "type": "number",
       "title": "Big agent context (tokens)",
-      "description": "Context size from which an agent is guarded: decided when it has been idle long enough, refused a wake-up once its cache has expired.",
+      "description": "Context size from which an agent is guarded: the agent guard acts on it before its cache expires, and a wake-up is refused once its cache has expired.",
       "default": 60000
     },
     "fleetRetireContextTokens": {
@@ -268,6 +268,48 @@
       "title": "Seconds between log writes",
       "description": "Seconds between log writes while turns complete; a log is always written before a clear.",
       "default": 30
+    },
+    "cacheGuardAuto": {
+      "type": "boolean",
+      "title": "Agent guard acts by itself",
+      "description": "Before a stopped agent with live background work loses its prompt cache, Tether messages it (keep waiting, or hand over) and stops the leftover background tasks after a handover. Off: it only blocks the end of a turn and asks the model.",
+      "default": true
+    },
+    "cacheGuardLeadMinutes": {
+      "type": "number",
+      "title": "Agent guard lead (minutes)",
+      "description": "Act this many minutes before the cache expires (at most half the cache lifetime).",
+      "default": 20
+    },
+    "cacheGuardHandoverTokens": {
+      "type": "number",
+      "title": "Hand over at (tokens)",
+      "description": "A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm.",
+      "default": 250000
+    },
+    "cacheGuardHandoverWaitMinutes": {
+      "type": "number",
+      "title": "Handover wait (minutes)",
+      "description": "Minutes an agent gets to finish its handover; later the coordinator is alerted. The agent is never stopped silently.",
+      "default": 10
+    },
+    "cacheGuardKeepWarmMax": {
+      "type": "number",
+      "title": "Keep-warm limit",
+      "description": "Keep-warm messages to one agent before the coordinator is asked to decide.",
+      "default": 12
+    },
+    "cacheGuardKeepWarmText": {
+      "type": "string",
+      "title": "Keep-warm message",
+      "description": "The message that keeps a waiting agent warm.",
+      "default": "Tether cache guard: keep waiting, no action needed. Reply with one word, then wait as before."
+    },
+    "cacheGuardHandoverText": {
+      "type": "string",
+      "title": "Handover message",
+      "description": "The message that asks an agent to hand over and stop.",
+      "default": "Tether cache guard: hand over now. Commit your work, update STATUS.md (tip, done, left, running background jobs and their logs or result files, the next exact command), then stop. Do not start new work."
     },
     "stopEnabled": {
       "type": "boolean",

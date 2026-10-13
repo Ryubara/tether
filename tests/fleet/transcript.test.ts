@@ -1,7 +1,7 @@
 // Reading Claude Code's transcript files for agents fleet did not see start.
 import { expect, mock, test } from 'claude-code/testing'
 
-import { lastRequest, metaDescription, projectKey, subagentsDir } from '../../src/fleet/transcript'
+import { appendedText, lastRequest, liveTasks, metaDescription, projectKey, scanTasks, subagentsDir } from '../../src/fleet/transcript'
 
 const T0 = Date.parse('2026-10-12T20:00:00.000Z')
 
@@ -73,4 +73,27 @@ test('an agent started before fleet loaded gets its context and idle time, a res
   const count = reads.length
   await $.command.run({ command: 'tether-fleet', args: 'text' } as any)
   expect(reads.length).toBe(count)
+})
+
+test('liveTasks keeps the background tasks a transcript started and has not seen end, in the shape Claude Code writes', async () => {
+  const start = (id: string) => JSON.stringify({ type: 'user', toolUseResult: { backgroundTaskId: id }, message: { role: 'user', content: [{ type: 'tool_result', content: `Command running in background with ID: ${id}. Output is being written to: C:\\x\\${id}.output` }] } })
+  const end = (id: string, status: string) => JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<status>${status}</status>\n<summary>Background command done</summary>\n</task-notification>` } })
+  const text = [start('b1'), start('b2'), start('b3'), end('b1', 'completed'), end('b3', 'killed'), start('b4'), end('b4', 'failed'), start('b5')].join('\n')
+  expect(liveTasks(text)).toEqual(['b2', 'b5'])
+  // A task seen to end and started again (the id reused) counts as live
+  expect(liveTasks([start('b1'), end('b1', 'completed'), start('b1')].join('\n'))).toEqual(['b1'])
+  // An unfinished notification (no final status yet) does not end a task
+  expect(liveTasks([start('b1'), '<task-notification><task-id>b1</task-id>'].join('\n'))).toEqual(['b1'])
+  expect(liveTasks('')).toEqual([])
+})
+
+test('scanTasks reads one appended row, and appendedText joins its blocks', async () => {
+  const live = new Set<string>()
+  scanTasks(appendedText([{ type: 'tool_result', content: 'Command running in background with ID: z1. Output is being written to: y' }]), live)
+  scanTasks(appendedText([{ type: 'text', text: 'ordinary' }, { type: 'tool_result', content: [{ type: 'text', text: 'Command running in background with ID: z2.' }] }]), live)
+  expect([...live]).toEqual(['z1', 'z2'])
+  scanTasks(appendedText([{ type: 'text', text: '<task-notification><task-id>z1</task-id><status>completed</status></task-notification>' }]), live)
+  expect([...live]).toEqual(['z2'])
+  expect(appendedText('plain')).toBe('plain')
+  expect(appendedText(undefined)).toBe('')
 })

@@ -60,5 +60,14 @@
   "stop": {
     "enabled": true,
     "maxBlocks": 3
+  },
+  "cacheGuard": {
+    "auto": true,
+    "leadMinutes": 20,
+    "handoverTokens": 250000,
+    "handoverWaitMinutes": 10,
+    "keepWarmMax": 12,
+    "keepWarmText": "Tether cache guard: keep waiting, no action needed. Reply with one word, then wait as before.",
+    "handoverText": "Tether cache guard: hand over now. Commit your work, update STATUS.md (tip, done, left, running background jobs and their logs or result files, the next exact command), then stop. Do not start new work."
   }
 }
