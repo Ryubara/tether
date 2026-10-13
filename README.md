@@ -11,8 +11,8 @@ run inside Claude Code (version 2.1.287 or later). See the
 
 - **Fleet.** An agents pane and a status line: each subagent's state, context size, idle time and
   prompt-cache minutes left, with flags that say what waking it would cost. The `SendMessage` guard refuses
-  to wake a big agent whose prompt cache has expired (waking it re-writes the whole context into the cache),
-  for the main agent and for subagents. `/tether-fleet` opens the pane; `/tether-fleet text` prints it.
+  to wake an agent that has a recorded decision, and a big agent whose prompt cache has expired (waking it
+  re-writes the whole context into the cache), for the main agent and for subagents (see the agent guard rule). `/tether-fleet` opens the pane; `/tether-fleet text` prints it.
   **BIG-WAIT**: with `fleet.bigWaitTokens` set (0, the default, is off), a live agent whose context has reached
   it and whose annotation note (`fleet.annotate`) matches `fleet.bigWaitNote` (a regular expression, matched
   case-insensitively; empty: any note, but an agent with no note never matches) shows `BIG-WAIT` in the FLAGS
@@ -56,8 +56,16 @@ run inside Claude Code (version 2.1.287 or later). See the
   line's `detail` says why.
   The model records an owner (`assign`, a few hours) or a known wait (`waive`, optionally for one cause) with the
   `mcp__tether__pr_owner` tool; an expired owner raises the problem again.
-- **Agent guard.** The agents poller also tells stopped agents with a big context that nobody has decided about
-  as their prompt cache runs out (an agent that stepped before Tether loaded is read from its transcript); the model records `retired` or `done` with `mcp__tether__agent_decision`.
+- **Agent guard.** One rule. A stopped agent holding a big context (`fleet.bigContextTokens`, default 60k) that
+  has been idle for `actAfterMinutes` (the agents poller's setting, default 45: 15 minutes before a 60-minute
+  cache expires) is dealt with at once: the guard demands a decision and the Stop hook blocks until the model
+  records `retired` or `done` with `mcp__tether__agent_decision`. An agent that stepped before Tether loaded is
+  read from its transcript. An agent with a recorded decision is never woken: `SendMessage` to it is refused
+  ("decided retired/done: start a fresh agent from its notes"), whatever its cache age, unless the message starts
+  with the override token (`fleet.overrideToken`). An undecided big agent is refused only once it has been idle
+  for `fleet.cacheTtlMinutes` (default 60, the cache lifetime; it is the refusal threshold, so a lower value adds a
+  safety margin before the real expiry), and stays reported with "cache EXPIRED" until decided (the Stop limit
+  keeps that from looping). The pane's cold flag and cache countdown use the same `fleet.cacheTtlMinutes`.
 - **Stop hook.** The end of a turn is blocked while a PR problem or an undecided agent is open, at most
   `stop.maxBlocks` times in a row for the same reason. `/tether-guards` prints what is open.
 - **Housekeeping.** Tether's folder, the handoff and a project-relative config go into `.git/info/exclude` (no
@@ -100,12 +108,12 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `checkpointInjectHandoff` | `false` | When a session starts (new, resumed, cleared or compacted) and the handoff file exists, add its text to the session as context. |
 | `checkpointMaxRepairs` | `3` | Repair attempts before the cycle gives up and the session carries on. |
 | `fleetEnabled` | `true` | The agents pane, the status line and the SendMessage guard. |
-| `fleetCacheTtlMinutes` | `60` | How long the prompt cache lives after an agent's last request (5, or 60 with subagentPromptCacheTtl 1h). |
-| `fleetBigContextTokens` | `60000` | Context size from which an expired cache is worth guarding. |
+| `fleetCacheTtlMinutes` | `60` | How long the prompt cache is taken to live after an agent's last request (5, or 60 with subagentPromptCacheTtl 1h). It is also the idle time from which waking an undecided big agent is refused, so a lower value adds a safety margin before the real expiry. |
+| `fleetBigContextTokens` | `60000` | Context size from which an agent is guarded: decided when it has been idle long enough, refused a wake-up once its cache has expired. |
 | `fleetRetireContextTokens` | `300000` | Context size at which an agent is flagged for retirement. |
 | `fleetBigWaitTokens` | `0` | An agent with at least this context and a matching note (see the note pattern) is flagged BIG-WAIT. 0: off. |
 | `fleetBigWaitNote` | (empty) | A regular expression matched case-insensitively against the agent's annotation note. Empty: any note. |
-| `fleetColdGuard` | `true` | Refuse SendMessage to a big agent whose cache has expired, unless the message starts with the override token. |
+| `fleetColdGuard` | `true` | Refuse SendMessage to an agent with a recorded decision, and to an undecided big agent whose cache has expired, unless the message starts with the override token. |
 | `fleetOverrideToken` | `[cache-ok]` | The text a message starts with to pass the cold-cache guard on purpose. |
 | `fleetShowSession` | `false` | Also show the main session context and the tightest rate limit in the status line. |
 | `fleetUsageWarnPercent` | `90` | A rate limit at or above this percent gets a !. Only shown with Show session context. |

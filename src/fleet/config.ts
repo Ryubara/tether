@@ -2,7 +2,7 @@
 
 /** Everything fleet can be told. Every field has a default, so a config file names only what it changes. */
 export type FleetConfig = {
-  /** How long the prompt cache lives after an agent's last request (Claude Code's 5 min, or 60 with `subagentPromptCacheTtl: "1h"`). */
+  /** How long the prompt cache is taken to live after an agent's last request (Claude Code's 5 min, or 60 with `subagentPromptCacheTtl: "1h"`); the idle time from which an undecided big agent is refused a wake-up. A lower value adds a safety margin before the real expiry. */
   cacheTtlMinutes: number
   /** Context size from which an expired cache is worth guarding: re-writing it costs real money. */
   bigContextTokens: number

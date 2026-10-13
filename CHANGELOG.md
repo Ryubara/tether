@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.0-alpha.19
+
+- Changed: the agent guard is one rule. A stopped agent with a big context (`fleet.bigContextTokens`) idle for
+  the agents poller's `actAfterMinutes` (default 45) is a finding at once and the Stop hook blocks until a
+  decision (`retired` or `done`) is recorded. An agent with a recorded decision is never woken: the cold-cache
+  guard refuses any `SendMessage` to it, whatever its cache age, unless the message starts with the override
+  token. An undecided big agent is still refused only once idle for `fleet.cacheTtlMinutes` (default 60; a lower
+  value adds a safety margin). The pane's cold flag and countdown are unchanged.
+- Removed: the agents poller's `forgetAgentMinutes` (default 180). An undecided agent is no longer forgotten:
+  it stays reported, with "cache EXPIRED", until decided; `stop.maxBlocks` prevents a loop. A config that still
+  sets it is read without error and the value is ignored.
+
 ## 1.0.0-alpha.18
 
 - Changed: every command now carries the `tether-` prefix, so Tether's commands sort together and cannot clash

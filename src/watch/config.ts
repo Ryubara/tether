@@ -49,10 +49,8 @@ export type AgentsPoller = {
   contextTokens: number
   /** Also count agents `waiting` on their own background work as silent (off: that wait is normal). */
   includeWaiting: boolean
-  /** A stopped agent with a big context is a finding (and blocks the Stop hook) this long after its last request, until decided. */
+  /** A stopped agent with a big context is a finding (and blocks the Stop hook) this long after its last request, until decided. It is the lead time before the cache (`fleet.cacheTtlMinutes`) expires. */
   actAfterMinutes: number
-  /** A stopped agent quiet longer than this is forgotten. */
-  forgetAgentMinutes: number
   dedupe: boolean
   forgetMinutes: number
   wake: boolean
@@ -189,7 +187,6 @@ function poller(raw: unknown, i: number, problems: string[]): Poller | undefined
       contextTokens: num(r.contextTokens, 300_000),
       includeWaiting: r.includeWaiting === true,
       actAfterMinutes: num(r.actAfterMinutes, 45),
-      forgetAgentMinutes: num(r.forgetAgentMinutes, 180),
     }
   }
   if (r.kind === 'prs') {

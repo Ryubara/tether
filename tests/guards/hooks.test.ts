@@ -165,8 +165,26 @@ test('a stopped big agent blocks Stop until it is decided', { timeoutMs: 30_000 
   const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
   expect(stop.block).toContain('CACHE GUARD')
   expect(stop.block).toContain('a1')
+  // Undecided and warm (50 min idle, cache of 60): a message still goes through
+  expect(await $.tool.call({ tool: 'SendMessage', to: 'a1', message: 'go on' } as any)).toEqual({ result: 'ok' })
   await $.tool.call({ tool: 'mcp__tether__agent_decision', id: 'a1', decision: 'retired', note: 'successor later' } as any)
   expect((((await ($ as any).classic.Stop({ stop_hook_active: false })) as any).block)).toBeUndefined()
+  // Decided: never woken, though its cache is still warm; the override token passes
+  const refused: any = await $.tool.call({ tool: 'SendMessage', to: 'a1', message: 'go on' } as any)
+  expect(refused.deny).toMatch(/decided retired.*never woken/)
+  expect(await $.tool.call({ tool: 'SendMessage', to: 'a1', message: '[cache-ok] go on' } as any)).toEqual({ result: 'ok' })
+})
+
+test('the guard demands a decision at 45 minutes and not before', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: [{ id: 'a1', status: 'completed', description: 'builder', type: 'general-purpose' }] })
+  const clock = await start($, on, { watch: { pollers: [{ id: 'agents', kind: 'agents', everySeconds: 60 }] }, fleet: { bigContextTokens: 1000 } }, w)
+  const stream = ($ as any).turn.step({ turnId: 't', index: 0, model: 'm', messageCount: 1, agentId: 'a1' })
+  let s = await stream.next()
+  while (s.done !== true) s = await stream.next()
+  await clock.advance(40 * MIN)
+  expect((((await ($ as any).classic.Stop({ stop_hook_active: false })) as any).block)).toBeUndefined()
+  await clock.advance(6 * MIN)
+  expect(((await ($ as any).classic.Stop({ stop_hook_active: false })) as any).block).toContain('CACHE GUARD')
 })
 
 test('a big agent that stepped before Tether loaded is still caught, from its transcript', { timeoutMs: 30_000 }, async ($, on) => {
