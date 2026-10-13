@@ -4,8 +4,8 @@ Tether holds a project together across Claude Code sessions. It is a *mod*: a Cl
 run inside Claude Code (version 2.1.287 or later). See the
 [mods overview](https://code.claude.com/docs/en/plugins/mods/overview).
 
-> **Status: 1.0.0-alpha.** The agents pane and the watchers work and are tested. The checkpoint cycle,
-> conversation logs and `HANDOFF.md` checks are being built; see the [changelog](CHANGELOG.md).
+> **Status: 1.0.0-alpha.** Everything below works and is tested; the checkpoint cycle is off by default. See the
+> [changelog](CHANGELOG.md).
 
 ## What it does today
 
@@ -26,6 +26,22 @@ run inside Claude Code (version 2.1.287 or later). See the
   the model to write the handoff file (`HANDOFF.md` by default), checks it (the headings in `sections` and the
   `maxChars` limit), repairs it up to `maxRepairs` times, then runs `/clear` and continues from it. It never
   clears over a handoff that fails its check. Nothing is cleared while you are typing or a turn is running.
+
+- **PR guard.** A `prs` poller tells each problem with an open pull request that nobody owns: a conflict, failed
+  checks, CI that seems stuck, auto-merge off (opt in), or work in a worktree that was never pushed. By default it
+  reads GitHub with `gh`; `command` swaps in the project's own health command (its JSON is `{ "stuck": [...] }`).
+  The model records an owner (`assign`, a few hours) or a known wait (`waive`, optionally for one cause) with the
+  `mcp__tether__pr_owner` tool; an expired owner raises the problem again.
+- **Agent guard.** The agents poller also tells stopped agents with a big context that nobody has decided about
+  as their prompt cache runs out; the model records `retired` or `done` with `mcp__tether__agent_decision`.
+- **Stop hook.** The end of a turn is blocked while a PR problem or an undecided agent is open, at most
+  `stop.maxBlocks` times in a row for the same reason. `/guards` prints what is open.
+- **Housekeeping.** Tether's folder, the handoff and a project-relative config go into `.git/info/exclude` (no
+  tracked file is touched); a missing `HANDOFF.md` is made from the template; a Write of it that breaks the
+  template is refused.
+- **Conversation logs.** Each session is rendered to `.tether/conversations/` as Markdown, after every turn,
+  before a checkpoint clear and when the session ends. Logs are for you to look back at; they are never loaded
+  into a session.
 
 ## Install
 

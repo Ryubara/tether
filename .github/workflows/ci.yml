@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Version matches the changelog
+        run: sh scripts/check-version.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 22

@@ -6,6 +6,7 @@
 // turn. State lives in module variables on purpose: they survive /clear.
 
 import type { Register } from 'claude-code'
+import type { PrsPoller } from '../src/watch/config'
 import { DEFAULTS, mergeConfig, type FleetConfig } from '../src/fleet/config'
 import { coldGuard } from '../src/fleet/guard'
 import { recordStep, type Ledger } from '../src/fleet/ledger'
@@ -19,6 +20,12 @@ import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type AgentSeen
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems } from '../src/checkpoint/handoff'
 import { askText, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
+import { stopReason as agentStopReason, undecided, type Undecided } from '../src/guards/agents'
+import { GH_FIELDS, fromGh, fromHealth, problemKey, problemLine, stopReason as prStopReason, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
+import { pruneOwners, readStore, recordDecision, recordOwner, type GuardStore } from '../src/guards/store'
+import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
+import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
+import { logName, renderConversation, type LogMessage } from '../src/conversation/render'
 
 // ---- FLEET ----
 // fleet: see the session's agents and what they cost, and refuse waking a big agent on a cold cache.
@@ -508,10 +515,17 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
     let result: { findings?: Finding[]; error?: string }
     if (p.kind === 'agents') {
       try {
-        result = { findings: agentFindings(p, await agentsSeen($, await $.clock.now()), await $.clock.now()) }
+        const at = await $.clock.now()
+        const seen = await agentsSeen($, at)
+        const guard = { store: await guardStore($), cacheMinutes: cfg.cacheTtlMinutes, smallTokens: cfg.bigContextTokens }
+        result = { findings: agentFindings(p, seen, at, guard) }
+        // The Stop hook blocks over the same agents the poller tells
+        lastUndecided = undecided(seen, guard.store, { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, actAfterMinutes: p.actAfterMinutes, forgetMinutes: p.forgetAgentMinutes }, at)
       } catch (err) {
         result = { error: String(err) }
       }
+    } else if (p.kind === 'prs') {
+      result = await prsFindings($, p)
     } else {
       result = await runCommand($, p)
     }
@@ -891,6 +905,238 @@ async function checkpointAfterClear($: any): Promise<void> {
   $.clock.after(1000, () => $.prompt.submit({ text: continueText(cpCfg) }))
 }
 
+// ---- GUARDS ----
+// The PR guard and the agent guard: problems nobody owns are told by the pollers (kind `prs`, and the agents
+// poller's undecided agents), recorded by the model with two tools, and block the end of a turn until dealt
+// with. One store (src/guards/store.ts) holds the owners, waivers and decisions.
+
+const TOOL_PR = 'pr_owner'
+const TOOL_AGENT = 'agent_decision'
+/** Every PR problem the last `prs` poll saw, owned or not; the Stop hook filters it by the store. */
+let lastProblems: Problem[] = []
+/** The stopped, big, undecided agents at the last agents poll. */
+let lastUndecided: Undecided[] = []
+let stopCfg: StopConfig = STOP_DEFAULTS
+let stopState: StopState | undefined
+
+/** The guards' store from $.store. */
+async function guardStore($: any): Promise<GuardStore> {
+  return readStore(await $.store.get(`guards:${wcfg.storeName}`))
+}
+
+/** Saves the guards' store. */
+async function saveGuardStore($: any, store: GuardStore): Promise<void> {
+  await $.store.set(`guards:${wcfg.storeName}`, store)
+}
+
+/** Local time as `YYYY-MM-DDTHH:MM:SS`, for log names and headers. */
+function localStamp(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/** Open PRs whose idle worktree holds commits origin lacks (the poller's `worktrees` setting). */
+async function unpushedIn($: any, p: PrsPoller, heads: Map<number, { branch: string; sha: string }>): Promise<Problem[]> {
+  const out: Problem[] = []
+  for (const [number, h] of heads) {
+    const wt = `${p.worktrees}/${h.branch}`
+    if (!(await $.fs.exists(wt))) continue
+    if (p.busyMarker && (await $.fs.exists(`${wt}/${p.busyMarker}`))) continue
+    const git = async (...args: string[]): Promise<string> => {
+      const r = await $.process.run(['git', '-C', wt, ...args], { timeoutMs: 30_000 })
+      return r.exitCode === 0 ? String(r.stdout).trim() : ''
+    }
+    if ((await git('rev-parse', '--abbrev-ref', 'HEAD')) !== h.branch) continue
+    const ahead = await git('rev-list', '--count', `origin/${h.branch}..HEAD`)
+    if (ahead && ahead !== '0') out.push(unpushedProblem(number, h.branch, Number(ahead), (await git('rev-parse', 'HEAD')) || '?'))
+  }
+  return out
+}
+
+/** One run of a `prs` poller: the problems with no owner, as findings; the Stop hook gets all problems. */
+async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]; error?: string }> {
+  const run = (command: string[], timeoutMs: number) => $.process.run(command, { timeoutMs, ...(p.cwd ? { cwd: p.cwd } : {}) })
+  try {
+    const listed = await run(['gh', 'pr', 'list', '--state', 'open', '--limit', '100', '--json', GH_FIELDS], 60_000)
+    if (listed.exitCode !== 0) return { error: `gh pr list: exit ${listed.exitCode}` }
+    const list = JSON.parse(listed.stdout) as Array<{ number: number; headRefName: string; headRefOid: string }>
+    const heads = new Map(list.map(x => [x.number, { branch: x.headRefName, sha: x.headRefOid }]))
+    const now = await $.clock.now()
+    let found: Problem[]
+    if (p.command) {
+      const r = await run(p.command, p.timeoutMs)
+      if (r.exitCode !== 0) return { error: `health command: exit ${r.exitCode}` }
+      found = fromHealth(JSON.parse(r.stdout), heads)
+    } else {
+      found = fromGh(list, { stuckMinutes: p.stuckMinutes, requireAutoMerge: p.requireAutoMerge, ignoreDrafts: p.ignoreDrafts }, now)
+    }
+    if (p.worktrees) found = [...found, ...(await unpushedIn($, p, heads))]
+    lastProblems = found
+    const store = await guardStore($)
+    const pruned = pruneOwners(store, now)
+    if (pruned !== store) await saveGuardStore($, pruned)
+    return { findings: unowned(found, pruned, now).map(x => ({ key: problemKey(x), text: problemLine(x) })) }
+  } catch (err) {
+    return { error: String(err) }
+  }
+}
+
+/** The result of a Tether tool: one text block. */
+function toolText(text: string): any {
+  return { result: { content: [{ type: 'text', text }] } }
+}
+
+/** Registers the two tools the model records owners and decisions with. */
+async function registerGuardTools($: any): Promise<void> {
+  try {
+    await $.tool.register({
+      name: TOOL_PR,
+      description: 'Record who fixes a problem with an open pull request (kind "assign": an owner for a few hours), or a known wait (kind "waive": hours and a reason; with "cause" only that cause is covered). Tether\'s PR guard keeps blocking the end of a turn until every problem has an owner or a waiver.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          pr: { type: 'number', description: 'The pull request number' },
+          kind: { type: 'string', enum: ['assign', 'waive'] },
+          who: { type: 'string', description: 'For assign: who fixes it (an agent id or name)' },
+          hours: { type: 'number', description: 'For waive: how long the wait lasts; for assign: optional, the poller\'s assignHours by default' },
+          cause: { type: 'string', description: 'Only this cause is covered (conflict, checks-failed, ci-stuck, auto-merge-off, unpushed, ...); absent: every cause of the PR' },
+          note: { type: 'string', description: 'What is being done, or why it waits' },
+        },
+        required: ['pr', 'kind', 'note'],
+      },
+    })
+    await $.tool.register({
+      name: TOOL_AGENT,
+      description: 'Record the decision about a stopped subagent that holds a big context: "retired" (stopped, a fresh agent will take over) or "done" (its work is finished). Tether\'s agent guard keeps blocking the end of a turn until each such agent is decided before its prompt cache expires.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The agent id' },
+          decision: { type: 'string', enum: ['retired', 'done'] },
+          note: { type: 'string' },
+        },
+        required: ['id', 'decision'],
+      },
+    })
+  } catch (err) {
+    $.ui.log(`guards: the tools were not registered: ${err}`)
+  }
+}
+
+/** Serves pr_owner: records an owner or a waiver. */
+async function prOwnerCall($: any, e: any): Promise<any> {
+  const pr = Number(e.pr)
+  if (!Number.isInteger(pr) || pr <= 0) return { deny: 'pr must be a pull request number' }
+  if (e.kind !== 'assign' && e.kind !== 'waive') return { deny: 'kind must be "assign" or "waive"' }
+  const prsPoller = wcfg.pollers.find((x): x is PrsPoller => x.kind === 'prs')
+  const hours = Number(e.hours) > 0 ? Number(e.hours) : e.kind === 'assign' ? (prsPoller?.assignHours ?? 4) : 0
+  if (hours <= 0) return { deny: 'a waiver needs hours' }
+  const who = e.kind === 'waive' ? 'waived' : String(e.who ?? '').trim()
+  if (who === '') return { deny: 'an assignment needs who' }
+  const now = await $.clock.now()
+  const cause = typeof e.cause === 'string' && e.cause.trim() !== '' ? e.cause.trim() : undefined
+  await saveGuardStore($, recordOwner(await guardStore($), pr, who, hours, String(e.note ?? ''), now, localStamp(now).replace('T', ' ').slice(0, 16), cause))
+  return toolText(`#${pr} ${e.kind === 'waive' ? 'waived' : 'assigned to ' + who} for ${hours} h${cause ? ` (cause ${cause})` : ''}.`)
+}
+
+/** Serves agent_decision: records that a stopped agent is retired or done. */
+async function agentDecisionCall($: any, e: any): Promise<any> {
+  if (typeof e.id !== 'string' || e.id.trim() === '') return { deny: 'id must be an agent id' }
+  if (e.decision !== 'retired' && e.decision !== 'done') return { deny: 'decision must be "retired" or "done"' }
+  const now = await $.clock.now()
+  await saveGuardStore($, recordDecision(await guardStore($), e.id.trim(), e.decision, String(e.note ?? ''), localStamp(now).replace('T', ' ').slice(0, 16)))
+  return toolText(`${e.id.trim()} recorded as ${e.decision}.`)
+}
+
+/** What /guards prints: the PR problems nobody owns, the owners and waivers, the agents awaiting a decision. */
+async function guardsReport($: any): Promise<string> {
+  const now = await $.clock.now()
+  const store = await guardStore($)
+  const open = unowned(lastProblems, store, now)
+  const lines = [`guards: ${lastProblems.length} PR problem${lastProblems.length === 1 ? '' : 's'} at the last poll, ${open.length} without an owner`]
+  for (const p of open) lines.push(`- #${p.number} ${p.branch}: ${p.text}`)
+  for (const [pr, o] of Object.entries(store.owners)) {
+    if (o.until > now) lines.push(`owner #${pr}: ${o.who}${o.cause ? ` (${o.cause})` : ''} for ${Math.round((o.until - now) / 3_600_000)} h more, ${o.note}`)
+  }
+  const waiting = lastUndecided.filter(u => !(u.id in store.decisions))
+  lines.push(`agents awaiting a decision: ${waiting.length}`)
+  for (const u of waiting) lines.push(`- ${u.text}`)
+  return lines.join('\n')
+}
+
+// ---- HOUSEKEEPING and CONVERSATION LOGS ----
+// Tether keeps its folder and the handoff out of git (.git/info/exclude, so no tracked file is edited), makes
+// the handoff from the template when it is missing, holds every write of it to the template, and keeps a
+// Markdown log of each session in <folder>/conversations.
+
+let hkCfg: HousekeepingConfig = HOUSEKEEPING_DEFAULTS
+let convCfg: ConversationsConfig = CONVERSATIONS_DEFAULTS
+let lastLogAt = -Infinity
+let logTimer: { cancel: () => void } | undefined
+let lastLogError = ''
+
+/** Reads the guards', housekeeping and conversation settings. */
+async function guardsStart($: any): Promise<void> {
+  const { root } = await readTetherConfig($, true)
+  hkCfg = mergeHousekeeping(root?.housekeeping)
+  convCfg = mergeConversations(root?.conversations)
+  stopCfg = mergeStop(root?.stop)
+}
+
+/** Adds Tether's lines to the repository's exclude file, makes a missing handoff, and reports a failing one. */
+async function housekeepingStart($: any): Promise<void> {
+  if (!hkCfg.enabled) return
+  try {
+    const where = await $.process.run(['git', 'rev-parse', '--git-path', 'info/exclude'], { timeoutMs: 10_000 })
+    if (where.exitCode === 0) {
+      const path = String(where.stdout).trim()
+      const existing = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+      const next = withExcludes(existing, excludeLines({ folder: hkCfg.folder, handoffFile: cpCfg.handoffFile, configFile, extra: hkCfg.exclude }))
+      if (next !== undefined) await $.fs.write(path, next)
+    }
+    if (hkCfg.createHandoff && !(await $.fs.exists(cpCfg.handoffFile))) {
+      await $.fs.write(cpCfg.handoffFile, handoffTemplate(cpCfg.sections))
+      $.ui.log(`housekeeping: made ${cpCfg.handoffFile} from the template`)
+    }
+    const problems = await handoffCheck($)
+    if (problems && problems.length > 0) {
+      $.ui.toast(`${cpCfg.handoffFile} fails its check`)
+      $.ui.log(`housekeeping: ${cpCfg.handoffFile} fails its check: ${problems.join('; ')}`)
+    }
+  } catch (err) {
+    $.ui.log(`housekeeping: ${err}`)
+  }
+}
+
+/** Writes this session's conversation log (whole each time); unless forced, at most every `minSeconds`, with a trailing write. */
+async function writeLog($: any, force = false): Promise<void> {
+  if (!hkCfg.enabled || !convCfg.enabled) return
+  const now = await $.clock.now()
+  if (!force && now - lastLogAt < convCfg.minSeconds * 1000) {
+    // Too soon: write once the gap has passed, so the last turns are not left out
+    if (!logTimer) logTimer = $.clock.after(convCfg.minSeconds * 1000, () => { logTimer = undefined; return writeLog($, true) }) as any
+    return
+  }
+  lastLogAt = now
+  try {
+    const id = String(await $.session.id())
+    const key = `conversation:start:${id}`
+    let started = await $.store.get(key)
+    if (typeof started !== 'string') {
+      started = localStamp(now)
+      await $.store.set(key, started)
+    }
+    const messages = (await $.session.messages()) as LogMessage[]
+    if (messages.length === 0) return
+    await $.fs.write(`${hkCfg.folder}/conversations/${logName(started as string, id)}`, renderConversation(messages, { sessionId: id, startedAt: (started as string).replace('T', ' ').slice(0, 16) }))
+    lastLogError = ''
+  } catch (err) {
+    if (String(err) !== lastLogError) $.ui.log(`conversations: the log was not written: ${err}`)
+    lastLogError = String(err)
+  }
+}
+
 export const register: Register = (on, opts) => {
   options = (opts ?? {}) as Record<string, unknown>
   registerFleet(on, opts)
@@ -898,14 +1144,73 @@ export const register: Register = (on, opts) => {
 
   on('session.start', async ($, e, next) => {
     await checkpointStart($)
+    await guardsStart($)
+    await housekeepingStart($)
+    await registerGuardTools($)
+    try {
+      await $.command.register({ name: 'guards', description: 'PR problems and stopped agents nobody has dealt with (guards)', immediate: true })
+    } catch {}
     return fleetStart($, e, (e2: any) => watchStart($, e2, next))
   })
+
+  // The model records an owner, a waiver or a decision with these tools.
+  on('tool.call', { tool: `mcp__tether__${TOOL_PR}` }, async ($, e) => prOwnerCall($, e))
+  on('tool.call', { tool: `mcp__tether__${TOOL_AGENT}` }, async ($, e) => agentDecisionCall($, e))
+  on('command.run', { command: 'guards' }, async ($) => ({ text: await guardsReport($) }))
+
+  // The end of a turn is blocked while a PR problem or a stopped big agent has no owner or decision, at most
+  // `stop.maxBlocks` times in a row for the same reason.
+  on('classic.Stop', async ($, e, next) => {
+    const r: any = await next(e)
+    if (!stopCfg.enabled) return r
+    const now = await $.clock.now()
+    const store = await guardStore($)
+    const reasons = [
+      unowned(lastProblems, store, now).length > 0 ? prStopReason(unowned(lastProblems, store, now)) : '',
+      lastUndecided.some(u => !(u.id in store.decisions)) ? agentStopReason(lastUndecided.filter(u => !(u.id in store.decisions))) : '',
+    ].filter(Boolean)
+    if (reasons.length === 0) {
+      stopState = undefined
+      return r
+    }
+    const reason = reasons.join('\n\n')
+    const verdict = stopBlocks(stopState, reason, stopCfg.maxBlocks, now)
+    stopState = verdict.next
+    return verdict.block ? { ...(r ?? {}), block: reason } : r
+  }).catch(($, e, next) => next(e))
+
+  // The handoff follows its template: a Write that breaks it is refused; an Edit that leaves it broken is told.
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => {
+    if (hkCfg.enabled && hkCfg.enforceHandoff && isHandoffPath((e as any).file_path, cpCfg.handoffFile)) {
+      const problems = handoffProblems(String((e as any).content ?? ''), cpCfg)
+      if (problems.length > 0) return { deny: `Tether: ${cpCfg.handoffFile} must follow its template (${problems.join('; ')}). Write it again with those fixed.` }
+    }
+    return next(e)
+  })
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
+    const r: any = await next(e)
+    if (!(hkCfg.enabled && hkCfg.enforceHandoff && isHandoffPath((e as any).file_path, cpCfg.handoffFile))) return r
+    const problems = await handoffCheck($)
+    if (!problems || problems.length === 0) return r
+    $.ui.toast(`${cpCfg.handoffFile} fails its check`)
+    return { ...r, context: [...(r?.context ?? []), `Tether: ${cpCfg.handoffFile} now fails its template check (${problems.join('; ')}). Fix it.`] }
+  })
+
+  // The conversation log is also written after each main-loop turn (in turn.complete below) and when the session ends.
+  on('classic.SessionEnd', async ($, e, next) => {
+    await writeLog($, true)
+    return next(e)
+  }).catch(($, e, next) => next(e))
   // A clear starts a new session: continue from the handoff if a checkpoint asked for it
   on('classic.SessionStart', async ($, e, next) => {
     if ((e as any).source === 'clear') await checkpointAfterClear($)
     return next(e)
   }).catch(($, e, next) => next(e))
-  on('turn.complete', async ($, e, next) => fleetComplete($, e, (e2: any) => watchComplete($, e2, next)))
+  on('turn.complete', async ($, e, next) => {
+    const r = await fleetComplete($, e, (e2: any) => watchComplete($, e2, next))
+    if (!(e as any).agentId) void writeLog($)
+    return r
+  })
   on('turn.step', async function* ($, e, next) {
     return yield* fleetStep($, e, (e2: any) => watchStep($, e2, next))
   })

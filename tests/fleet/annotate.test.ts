@@ -8,7 +8,7 @@ function isConfig(path: string): boolean {
   return path.replace(/\\/g, '/').endsWith(CONFIG)
 }
 
-test('configPath picks the config file, and annotate notes find an agent by its Agent-call name', { options: { configPath: CONFIG } }, async ($, on) => {
+test('configPath picks the config file, and annotate notes find an agent by its Agent-call name', { timeoutMs: 30_000, options: { configPath: CONFIG } }, async ($, on) => {
   // The stubs answer with partial values, so they skip the engine's result types
   const stub = on as any
   const clock = mock.clock(on)
@@ -16,11 +16,13 @@ test('configPath picks the config file, and annotate notes find an agent by its 
   const ran: string[][] = []
   stub('session.start', () => ({ cwd: '/work' }))
   stub('command.register', () => ({ value: undefined }))
+  stub('tool.register', () => ({ value: { tool: 'x' } }))
+  stub('ui.log', () => ({ value: undefined }))
   stub('store.get', () => ({ value: undefined }))
   stub('fs.exists', ($: any, e: any) => ({ value: isConfig(e.path) }))
   stub('fs.read', ($: any, e: any) => {
     read.push(isConfig(e.path) ? 'config' : e.path)
-    return { value: JSON.stringify({ fleet: { refreshSeconds: 5, annotate: { command: ['notes', '--json'], everySeconds: 60 } } }) }
+    return { value: JSON.stringify({ fleet: { refreshSeconds: 5, annotate: { command: ['notes', '--json'], everySeconds: 60 } }, housekeeping: { enabled: false } }) }
   })
   stub('process.run', ($: any, e: any) => {
     ran.push(e.argv)

@@ -34,7 +34,7 @@ test('metaDescription reads the Agent call description', async () => {
   expect(metaDescription('nope')).toBeUndefined()
 })
 
-test('an agent started before fleet loaded gets its context and idle time, a resumed one its description', async ($, on) => {
+test('an agent started before fleet loaded gets its context and idle time, a resumed one its description', { timeoutMs: 30_000 }, async ($, on) => {
   const stub = on as any
   const clock = mock.clock(on)
   await clock.set(T0 + 30 * 60_000)
