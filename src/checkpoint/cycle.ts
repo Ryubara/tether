@@ -92,13 +92,15 @@ export function repairText(cfg: CheckpointConfig, problems: string[]): string {
 
 /** Whether a user message is one of the cycle's own prompts (which are not new information). */
 export function isCyclePrompt(text: string, cfg: CheckpointConfig): boolean {
+  // The transcript keeps a plugin's prompt framed: "The <plugin> plugin sent a message:" comes first
+  const body = text.replace(/^The [^\n:]*? plugin sent a message:\s*/, '')
   const h = cfg.handoffFile
   return (
-    text.startsWith('Checkpoint: this session is long') ||
-    text === `Write ${h} now.` ||
-    text.startsWith(`Update ${h} with what changed`) ||
-    text.startsWith(`${h} failed its check:`) ||
-    text === `Continue from ${h}.`
+    body.startsWith('Checkpoint: this session is long') ||
+    body.trim() === `Write ${h} now.` ||
+    body.startsWith(`Update ${h} with what changed`) ||
+    body.startsWith(`${h} failed its check:`) ||
+    body.trim() === `Continue from ${h}.`
   )
 }
 

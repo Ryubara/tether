@@ -94,6 +94,9 @@ test('the cycle recognises its own prompts, so they never re-queue it; a person\
   expect(isCyclePrompt(askText(cfg, true), cfg)).toBe(true)
   expect(isCyclePrompt(repairText(cfg, ['missing the heading "## Summary"']), cfg)).toBe(true)
   expect(isCyclePrompt('Continue from HANDOFF.md.', cfg)).toBe(true)
+  // The transcript's framed copy of the same prompt is still a cycle prompt
+  expect(isCyclePrompt('The tether plugin sent a message:\n' + askText(cfg, true), cfg)).toBe(true)
+  expect(isCyclePrompt('The tether plugin sent a message: Checkpoint: this session is long, so', cfg)).toBe(true)
   expect(isCyclePrompt('Update the README for me', cfg)).toBe(false)
   expect(isCyclePrompt('the build is green, go on', cfg)).toBe(false)
 })
