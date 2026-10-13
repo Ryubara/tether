@@ -60,6 +60,8 @@ export type Poller = CommandPoller | AgentsPoller
 
 /** Everything watch can be told. */
 export type WatchConfig = {
+  /** Off: no poller runs, nothing wakes the model, and the pane's services row shows watch off. */
+  enabled: boolean
   pollers: Poller[]
   /** While the person has a draft in the prompt box, a wake waits up to this long, then goes anyway (the draft is kept). */
   deferWhileTypingMinutes: number
@@ -80,6 +82,7 @@ export type WatchConfig = {
 }
 
 export const DEFAULTS: WatchConfig = {
+  enabled: true,
   pollers: [],
   deferWhileTypingMinutes: 10,
   minWakeGapSeconds: 60,
@@ -183,6 +186,7 @@ export function parseConfig(raw: unknown): { config: WatchConfig; problems: stri
   if (typeof r.tickSeconds === 'number' && Number.isFinite(r.tickSeconds) && r.tickSeconds >= 0) config.tickSeconds = r.tickSeconds
   if (Number.isInteger(r.boxRows) && (r.boxRows as number) >= 1 && (r.boxRows as number) <= 50) config.boxRows = r.boxRows as number
   if (typeof r.stateFile === 'string') config.stateFile = r.stateFile.trim()
+  if (typeof r.enabled === 'boolean') config.enabled = r.enabled
   const pane = r.pane as Record<string, unknown> | undefined
   if (pane && typeof pane === 'object') {
     for (const k of ['rows', 'columns'] as const) if (Number.isInteger(pane[k]) && (pane[k] as number) > 0) config.pane[k] = pane[k] as number

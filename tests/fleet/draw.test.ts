@@ -57,10 +57,10 @@ test('the pane draws a summary and one row per agent on every pane surface', asy
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'fleet', surface, component: 'Pane', requestId: 'fleet', props: PANE_PROPS as any })
     const all = await texts(ui)
-    expect(all[0]?.text).toBe('1 agent (0 running, 1 waiting) · 1 cold')
-    expect(all[0]?.props.bold).toBe(true)
+    expect(all[4]?.text).toBe('1 agent (0 running, 1 waiting) · 1 cold')
+    expect(all[4]?.props.bold).toBe(true)
     // Rows are a Text of coloured cells; live agents first, ended ones last
-    expect(all[1]?.text.trimEnd()).toMatch(/^ {3}AGENT\s+STATE\s+CTX\s+IDLE\s+CACHE\s+FLAGS · NOTE$/)
+    expect(all[5]?.text.trimEnd()).toMatch(/^ {3}AGENT\s+STATE\s+CTX\s+IDLE\s+CACHE\s+FLAGS · NOTE$/)
     const rows = all.filter(t => /(worker|old review)\s/.test(t.text) && t.text.length > 40)
     expect(rows.map(t => t.text.trimEnd())).toEqual([
       expect.stringMatching(/^⏳ worker\s+waiting \(bg work\)\s+80k\s+61m\s+expired\s+🧊 wake≈80k$/),
@@ -83,6 +83,6 @@ test('the pane draws a summary and one row per agent on every pane surface', asy
 test('an empty session says so instead of drawing no rows', async ($, on) => {
   await start($, on, [])
   const ui = await $.ui.mount({ plugin: 'fleet', surface: 'terminal', component: 'Pane', requestId: 'fleet', props: PANE_PROPS as any })
-  expect((await texts(ui)).map(t => t.text)).toEqual(['0 agents', 'No agents in this session yet.'])
+  expect((await texts(ui)).map(t => t.text)).toEqual(['✅ Fleet   ✅ Watch', '✅ Fleet', '   ', '✅ Watch', '0 agents', 'No agents in this session yet.'])
   await ui.unmount()
 })

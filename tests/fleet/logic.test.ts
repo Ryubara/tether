@@ -141,3 +141,12 @@ test('columnTint is read from the config as a boolean or a colour', async () => 
   expect(mergeConfig({ columnTint: ' subtle ' }).columnTint).toBe('subtle')
   expect(mergeConfig({ columnTint: 5 }).columnTint).toBe(true)
 })
+
+test('enabled defaults on and turns fleet off, which also stops the cold guard', async () => {
+  expect(mergeConfig({}).enabled).toBe(true)
+  expect(mergeConfig({ enabled: false }).enabled).toBe(false)
+  expect(mergeConfig({ enabled: 'no' }).enabled).toBe(true)
+  const ledger: Ledger = new Map()
+  const cold = { ...DEFAULTS, enabled: false }
+  expect(coldGuard({ to: 'a1', message: 'hi' } as any, [{ id: 'a1', status: 'waiting', description: 'x', type: 't' } as any], ledger, 0, cold, new Map())).toBeUndefined()
+})

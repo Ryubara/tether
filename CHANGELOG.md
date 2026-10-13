@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.0-alpha.2
+
+- A services row opens the pane: `✅ Fleet` green when on, `❌ Watch` dimmed when off.
+- `enabled` in the `fleet` and `watch` sections (default `true`): off stops that part entirely.
+
 ## 1.0.0-alpha.1
 
 A rewrite of Tether as a Claude Code mod, replacing the 0.x hooks-and-skills plugin (the last 0.x release,

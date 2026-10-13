@@ -35,7 +35,7 @@ export function coldGuard(
   cfg: FleetConfig,
   names: Map<string, string> = new Map(),
 ): string | undefined {
-  if (!cfg.coldGuard || typeof input.to !== 'string') return undefined
+  if (!cfg.enabled || !cfg.coldGuard || typeof input.to !== 'string') return undefined
   const message = typeof input.message === 'string' ? input.message : ''
   if (message.trimStart().startsWith(cfg.overrideToken)) return undefined
   const agent = resolveAgent(input.to, agents, names)

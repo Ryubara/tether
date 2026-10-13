@@ -14,8 +14,12 @@ run inside Claude Code (version 2.1.287 or later). See the
   to wake a big agent whose prompt cache has expired (waking it re-writes the whole context into the cache),
   for the main agent and for subagents. `/fleet` opens the pane; `/fleet text` prints it.
 - **Watch.** Pollers that run inside the session: each finding is told once, and a model turn starts only for
-  new findings, never during a turn or while you type. `/watch` reports; `/watch pane` shows a box per
-  poller with its countdown and its findings.
+  new findings, never during a turn or while you type. `/watch` only reports (it never stops polling);
+  `/watch pane` shows a box per poller with its countdown and its findings; `/watch run`, `forget` and
+  `reload` poll now, tell findings again and re-read the config.
+- **Services row.** The pane starts with one line naming each service: `✅ Fleet` in green when it is on,
+  `❌ Watch` dimmed when it is off. A service is off when its section sets `"enabled": false`; it then runs
+  nothing (no polls, no refresh, no guard, no status text).
 
 ## Install
 
@@ -31,7 +35,7 @@ Then set the config with `/plugin configure tether@tether` (the `configPath` opt
 
 One JSON file, one section per part (`fleet`, `watch`). Every key is optional; the defaults are in
 `src/fleet/config.ts` and `src/watch/config.ts`. Colours, column tints and emoji are fleet keys
-(`colors`, `columnTint`, `emoji`).
+(`colors`, `columnTint`, `emoji`). `enabled` (default `true`) turns a whole section off.
 
 ## Develop
 

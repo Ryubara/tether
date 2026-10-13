@@ -246,10 +246,10 @@ const fleetStart = async ($: any, e: any, next: any): Promise<any> => {
   const now = await $.clock.now()
   coldToday = Number((await $.store.get(dayKey(now))) ?? 0)
   for (const t of timers) t.cancel()
-  timers = [$.clock.every(cfg.refreshSeconds * 1000, () => refresh($)) as any]
+  timers = cfg.enabled ? [$.clock.every(cfg.refreshSeconds * 1000, () => refresh($)) as any] : []
   // watch's boxes count down by the second, so the pane redraws that often while they exist
-  if (cfg.watchState) timers.push($.clock.every(1000, () => tickBoxes($)) as any)
-  if (cfg.annotate) {
+  if (cfg.enabled && cfg.watchState) timers.push($.clock.every(1000, () => tickBoxes($)) as any)
+  if (cfg.enabled && cfg.annotate) {
     timers.push($.clock.every(cfg.annotate.everySeconds * 1000, () => annotate($)) as any)
     // The first notes come soon after start rather than a whole interval later
     timers.push($.clock.after(1000, () => annotate($).then(() => refresh($))) as any)
@@ -273,7 +273,7 @@ async function* fleetStep($: any, e: any, next: any): any {
     const now = await $.clock.now()
     const id = (e as any).agentId ?? 'main'
     const v = recordStep(ledger, id, now, result.usage, cfg.cacheTtlMinutes, cfg.bigContextTokens)
-    if (v.isColdWake) {
+    if (v.isColdWake && cfg.enabled) {
       coldToday += v.written
       void $.store.set(dayKey(now), coldToday)
       const who = agents.find(a => a.id === id)
@@ -342,8 +342,13 @@ const registerFleet: Register = (on, options) => {
     const head = summary(rows, ledger.get('main')?.contextTokens, limits, coldToday, cfg)
     return (
       <Box flexDirection="column">
+        <Text wrap="truncate-end">
+          <Text color={cfg.enabled ? 'green' : undefined} dimColor={!cfg.enabled}>{`${cfg.enabled ? (cfg.emoji ? '✅' : '✓') : cfg.emoji ? '❌' : '✗'} Fleet`}</Text>
+          <Text>{'   '}</Text>
+          <Text color={wcfg.enabled ? 'green' : undefined} dimColor={!wcfg.enabled}>{`${wcfg.enabled ? (cfg.emoji ? '✅' : '✓') : cfg.emoji ? '❌' : '✗'} Watch`}</Text>
+        </Text>
         <Text bold wrap="truncate-end">
-          {head}
+          {cfg.enabled ? head : 'Fleet is off (fleet.enabled is false in the config).'}
         </Text>
         {rows.length === 0 && (
           <Text dimColor>
@@ -654,6 +659,11 @@ async function schedule($: any): Promise<void> {
   for (const t of watchTimers) t.cancel()
   nextAt.clear()
   const start = await $.clock.now()
+  if (!wcfg.enabled) {
+    watchTimers = []
+    watchStatus = undefined
+    return showStatus($)
+  }
   watchTimers = [$.clock.every(DELIVER_MS, () => deliver($))]
   wcfg.pollers.forEach((p, i) => {
     nextAt.set(p.id, start + 2_000 + i * 3_000)

@@ -12,6 +12,8 @@ export type FleetConfig = {
   coldGuard: boolean
   /** The text a message starts with to pass the cold-cache guard on purpose. */
   overrideToken: string
+  /** Off: fleet does nothing (no refresh, no guard, no status text) and the pane's services row shows it off. */
+  enabled: boolean
   /** Also show the main session's context and the tightest rate limit (off: most status lines already show them). */
   showSession: boolean
   /** With `showSession`, a rate limit at or above this percent gets a `!`. */
@@ -51,6 +53,7 @@ export const DEFAULTS: FleetConfig = {
   retireContextTokens: 300_000,
   coldGuard: true,
   overrideToken: '[cache-ok]',
+  enabled: true,
   showSession: false,
   usageWarnPercent: 90,
   refreshSeconds: 15,
@@ -71,6 +74,7 @@ export function mergeConfig(raw: unknown): FleetConfig {
     if (typeof r[key] === 'number' && Number.isFinite(r[key]) && (r[key] as number) > 0) out[key] = r[key] as number
   }
   if (typeof r.coldGuard === 'boolean') out.coldGuard = r.coldGuard
+  if (typeof r.enabled === 'boolean') out.enabled = r.enabled
   if (typeof r.showSession === 'boolean') out.showSession = r.showSession
   if (typeof r.watchState === 'string') out.watchState = r.watchState.trim()
   if (typeof r.emoji === 'boolean') out.emoji = r.emoji

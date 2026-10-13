@@ -109,3 +109,9 @@ test('wakeText groups findings under their poller titles', async () => {
   const p = (title: string, text: string): Pending => ({ key: text, text, poller: title, title, wake: true, at: 0 })
   expect(wakeText('New:', [p('PRs', 'one'), p('Disk', 'low'), p('PRs', 'two')])).toBe('New:\n\nPRs:\n- one\n- two\n\nDisk:\n- low')
 })
+
+test('enabled defaults on and turns watch off', async () => {
+  expect(parseConfig({}).config.enabled).toBe(true)
+  expect(parseConfig({ enabled: false }).config.enabled).toBe(false)
+  expect(parseConfig({ enabled: 'no' }).config.enabled).toBe(true)
+})
