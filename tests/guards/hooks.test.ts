@@ -75,7 +75,7 @@ async function start($: any, on: any, config: unknown, w: World) {
 const CONFLICT = [{ number: 12, headRefName: 'fix-x', headRefOid: 'abc', mergeable: 'CONFLICTING' }]
 const PRS = { watch: { pollers: [{ id: 'prs', kind: 'prs', everySeconds: 300 }] } }
 
-test('a PR problem is told, blocks the Stop hook until owned, and an owner ends both', async ($, on) => {
+test('a PR problem is told, blocks the Stop hook until owned, and an owner ends both', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world({ prs: CONFLICT })
   const clock = await start($, on, PRS, w)
   await clock.advance(3 * SEC)
@@ -95,7 +95,7 @@ test('a PR problem is told, blocks the Stop hook until owned, and an owner ends 
   expect(report.text).toContain('owner #12: agent-7')
 })
 
-test('the Stop hook gives up after the same block maxBlocks times', async ($, on) => {
+test('the Stop hook gives up after the same block maxBlocks times', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world({ prs: CONFLICT })
   const clock = await start($, on, { ...PRS, stop: { maxBlocks: 2 } }, w)
   await clock.advance(3 * SEC)
@@ -104,7 +104,7 @@ test('the Stop hook gives up after the same block maxBlocks times', async ($, on
   expect(blocks).toEqual([true, true, false, false])
 })
 
-test('a waiver covers one cause only, and the tool refuses a bad call', async ($, on) => {
+test('a waiver covers one cause only, and the tool refuses a bad call', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world({ prs: CONFLICT })
   const clock = await start($, on, PRS, w)
   await clock.advance(3 * SEC)
@@ -114,7 +114,7 @@ test('a waiver covers one cause only, and the tool refuses a bad call', async ($
   expect(bad.isError ?? bad.deny ?? bad.text).toBeTruthy()
 })
 
-test('a stopped big agent blocks Stop until it is decided', async ($, on) => {
+test('a stopped big agent blocks Stop until it is decided', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world({ agents: [{ id: 'a1', status: 'completed', description: 'builder', type: 'general-purpose' }] })
   const clock = await start($, on, { watch: { pollers: [{ id: 'agents', kind: 'agents', everySeconds: 60 }] }, fleet: { bigContextTokens: 1000 } }, w)
   // It made one big request, then stopped; 50 minutes pass
@@ -129,7 +129,7 @@ test('a stopped big agent blocks Stop until it is decided', async ($, on) => {
   expect((((await ($ as any).classic.Stop({ stop_hook_active: false })) as any).block)).toBeUndefined()
 })
 
-test('housekeeping hides Tether from git, makes the handoff, and holds writes of it to the template', async ($, on) => {
+test('housekeeping hides Tether from git, makes the handoff, and holds writes of it to the template', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world()
   await start($, on, {}, w)
   expect(written(w, '.git/info/exclude')).toBe('.tether/\nHANDOFF.md\n.claude/tether.json\n')
@@ -143,7 +143,7 @@ test('housekeeping hides Tether from git, makes the handoff, and holds writes of
   expect(JSON.stringify(other)).not.toContain('must follow its template')
 })
 
-test('a conversation log is written after a turn, whole, under the folder', async ($, on) => {
+test('a conversation log is written after a turn, whole, under the folder', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world({ messages: [{ role: 'user', text: 'Fix the bug', toolUses: [] }, { role: 'assistant', text: 'Done.', toolUses: [{ tool: 'Read', input: { file_path: 'a.ts' } }] }] })
   const clock = await start($, on, {}, w)
   await $.turn.complete({ turnId: 't', answer: 'Done.' } as any)

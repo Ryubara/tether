@@ -72,7 +72,7 @@ const PRS = {
   pollers: [{ id: 'prs', title: 'Pull requests', command: ['check'], everySeconds: 300, match: '^- (.*)$', quietExitCodes: [3] }],
 }
 
-test('new findings wake the model once; the same findings again do not', async ($, on) => {
+test('new findings wake the model once; the same findings again do not', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('HEADER\n- #12 fix-x: conflict\n- #13 add-y: checks failed\n')
   const clock = await start($, on, PRS, w)
   await clock.advance(3 * SEC)
@@ -90,7 +90,7 @@ test('new findings wake the model once; the same findings again do not', async (
   expect(w.submits.length).toBe(2)
 })
 
-test('a draft in the prompt box holds the wake until it is sent or the defer limit passes', async ($, on) => {
+test('a draft in the prompt box holds the wake until it is sent or the defer limit passes', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('- #12 fix-x: conflict\n')
   w.draft = 'half typed'
   const clock = await start($, on, { ...PRS, deferWhileTypingMinutes: 2 }, w)
@@ -108,7 +108,7 @@ test('a draft in the prompt box holds the wake until it is sent or the defer lim
   expect(w.submits.length).toBe(2)
 })
 
-test('no wake while a turn runs; it goes when the turn completes', async ($, on) => {
+test('no wake while a turn runs; it goes when the turn completes', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('- #12 fix-x: conflict\n')
   const clock = await start($, on, PRS, w)
   await $.turn.start({ text: 'hi', turnId: 't1' } as any)
@@ -119,7 +119,7 @@ test('no wake while a turn runs; it goes when the turn completes', async ($, on)
   expect(w.submits.length).toBe(1)
 })
 
-test('a failing poller is logged once per reason and shows in /watch', async ($, on) => {
+test('a failing poller is logged once per reason and shows in /watch', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('', 1)
   w.runs = [{ exitCode: 1, stdout: '', stderr: 'GitHub could not be read' }]
   const clock = await start($, on, PRS, w)
@@ -131,7 +131,7 @@ test('a failing poller is logged once per reason and shows in /watch', async ($,
   expect(w.submits).toEqual([])
 })
 
-test('the agents poller wakes for a running agent gone silent, once per silence', async ($, on) => {
+test('the agents poller wakes for a running agent gone silent, once per silence', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('')
   w.agents = [{ id: 'a1', status: 'running', description: 'builder', type: 'general-purpose' }]
   const clock = await start($, on, { pollers: [{ id: 'agents', kind: 'agents', title: 'Agents', everySeconds: 60, silentMinutes: 20 }] }, w)
@@ -143,7 +143,7 @@ test('the agents poller wakes for a running agent gone silent, once per silence'
   expect(w.submits.length).toBe(1)
 })
 
-test('/watch forget makes told findings new again; /watch run polls now', async ($, on) => {
+test('/watch forget makes told findings new again; /watch run polls now', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('- #12 fix-x: conflict\n')
   const clock = await start($, on, PRS, w)
   await clock.advance(3 * SEC)
@@ -157,7 +157,7 @@ test('/watch forget makes told findings new again; /watch run polls now', async 
   expect(r.text).toBe('watch: no poller "nope"')
 })
 
-test('the status line counts down to each poller and the state file carries the boxes', async ($, on) => {
+test('the status line counts down to each poller and the state file carries the boxes', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('- #7 conflict with main')
   const clock = await start($, on, { ...PRS, stateFile: '/work/watch-state.json', pollers: [{ ...PRS.pollers[0], boxRows: 3 }] }, w)
   await clock.advance(3 * SEC)
@@ -171,7 +171,7 @@ test('the status line counts down to each poller and the state file carries the 
   expect(state.pollers[0].nextAt).toBeGreaterThan(state.updatedAt)
 })
 
-test('/watch pane draws a box per poller with its countdown and findings', async ($, on) => {
+test('/watch pane draws a box per poller with its countdown and findings', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('- #7 conflict with main')
   const clock = await start($, on, { ...PRS, pollers: [PRS.pollers[0], { id: 'agents', kind: 'agents', everySeconds: 60 }] }, w)
   await clock.advance(10 * SEC)

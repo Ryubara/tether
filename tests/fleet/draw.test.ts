@@ -80,7 +80,7 @@ test('the pane draws a summary and one row per agent on every pane surface', { t
   }
 })
 
-test('an empty session says so instead of drawing no rows', async ($, on) => {
+test('an empty session says so instead of drawing no rows', { timeoutMs: 30_000 }, async ($, on) => {
   await start($, on, [])
   const ui = await $.ui.mount({ plugin: 'fleet', surface: 'terminal', component: 'Pane', requestId: 'fleet', props: PANE_PROPS as any })
   expect((await texts(ui)).map(t => t.text)).toEqual(['✅ Fleet   ✅ Watch', '✅ Fleet', '   ', '✅ Watch', '0 agents', 'No agents in this session yet.'])

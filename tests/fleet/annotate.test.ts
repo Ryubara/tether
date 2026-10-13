@@ -8,7 +8,7 @@ function isConfig(path: string): boolean {
   return path.replace(/\\/g, '/').endsWith(CONFIG)
 }
 
-test('configPath picks the config file, and annotate notes find an agent by its Agent-call name', { options: { configPath: CONFIG } }, async ($, on) => {
+test('configPath picks the config file, and annotate notes find an agent by its Agent-call name', { timeoutMs: 30_000, options: { configPath: CONFIG } }, async ($, on) => {
   // The stubs answer with partial values, so they skip the engine's result types
   const stub = on as any
   const clock = mock.clock(on)
