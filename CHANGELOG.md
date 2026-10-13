@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-alpha.14
+
+- Fixed: the agent guard forgot every agent that had stepped before Tether loaded (a plugin reload, a restart, a
+  `/clear`), because it only knew requests it had seen. It now reads the agent's last request from Claude Code's
+  transcript, as the fleet pane does, so a stopped big agent is still told and still blocks Stop.
+
 ## 1.0.0-alpha.13
 
 - Fixed: a `prs` poller's health command that exits 1 (as Coney's `pr-health` does whenever a PR is stuck) was

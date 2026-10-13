@@ -35,7 +35,7 @@ run inside Claude Code (version 2.1.287 or later). See the
   The model records an owner (`assign`, a few hours) or a known wait (`waive`, optionally for one cause) with the
   `mcp__tether__pr_owner` tool; an expired owner raises the problem again.
 - **Agent guard.** The agents poller also tells stopped agents with a big context that nobody has decided about
-  as their prompt cache runs out; the model records `retired` or `done` with `mcp__tether__agent_decision`.
+  as their prompt cache runs out (an agent that stepped before Tether loaded is read from its transcript); the model records `retired` or `done` with `mcp__tether__agent_decision`.
 - **Stop hook.** The end of a turn is blocked while a PR problem or an undecided agent is open, at most
   `stop.maxBlocks` times in a row for the same reason. `/guards` prints what is open.
 - **Housekeeping.** Tether's folder, the handoff and a project-relative config go into `.git/info/exclude` (no
