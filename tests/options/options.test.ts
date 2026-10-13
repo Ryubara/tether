@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint } from '../../src/checkpoint/config'
 import { DEFAULTS as FLEET_DEFAULTS, mergeConfig } from '../../src/fleet/config'
+import { CACHE_GUARD_DEFAULTS, mergeCacheGuard } from '../../src/guards/config'
 import { CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, mergeConversations, mergeHousekeeping, mergeStop } from '../../src/housekeeping/config'
 import { OPTIONS, PANES, fromOptions, layered } from '../../src/options/options'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig } from '../../src/watch/config'
@@ -24,6 +25,7 @@ test('the option defaults reproduce every section\'s own defaults', async () => 
   expect(mergeHousekeeping(layered(defaults, 'housekeeping', undefined))).toEqual(HOUSEKEEPING_DEFAULTS)
   expect(mergeConversations(layered(defaults, 'conversations', undefined))).toEqual(CONVERSATIONS_DEFAULTS)
   expect(mergeStop(layered(defaults, 'stop', undefined))).toEqual(STOP_DEFAULTS)
+  expect(mergeCacheGuard(layered(defaults, 'cacheGuard', undefined))).toEqual(CACHE_GUARD_DEFAULTS)
 })
 
 test('an option reaches its section, and the project file wins', async () => {
@@ -35,6 +37,7 @@ test('an option reaches its section, and the project file wins', async () => {
   expect(parseConfig(layered(o, 'watch', undefined)).config.minWakeGapSeconds).toBe(120)
   expect(parseConfig(layered(o, 'watch', { minWakeGapSeconds: 30 })).config.minWakeGapSeconds).toBe(30)
   expect(mergeStop(layered(o, 'stop', undefined)).maxBlocks).toBe(2)
+  expect(mergeCacheGuard(layered({ cacheGuardAuto: false, cacheGuardLeadMinutes: 30 }, 'cacheGuard', { handoverTokens: 200_000 }))).toMatchObject({ auto: false, leadMinutes: 30, handoverTokens: 200_000, keepWarmMax: 12 })
   expect(mergeConversations(layered(o, 'conversations', undefined)).minSeconds).toBe(90)
   expect(mergeHousekeeping(layered(o, 'housekeeping', undefined)).folder).toBe('.hold')
 })

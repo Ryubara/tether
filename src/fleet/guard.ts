@@ -27,7 +27,7 @@ export function resolveAgent(to: string, agents: AgentLike[], names: Map<string,
  * Decides a SendMessage call. Returns the refusal text for the model, or undefined to let it through.
  *
  * One rule per kind of agent. An agent with a recorded decision (retired or done; `decisions`, by agent id) is
- * never woken, whatever its cache age. An undecided agent is refused only when it is big and its cache has
+ * never woken, whatever its cache age (kept-warm is not a decision of that kind: it records a ping). An undecided agent is refused only when it is big and its cache has
  * really expired. A message to an agent fleet has no request for (spawned before fleet loaded) and no decision
  * passes: there is no evidence its cache is cold. A message that starts with the override token passes on
  * purpose.
@@ -47,7 +47,9 @@ export function coldGuard(
   const agent = resolveAgent(input.to, agents, names)
   const id = agent?.id ?? input.to
   const who = agent?.name ?? (input.to !== agent?.id ? input.to : agent?.description ?? input.to)
-  const decided = Object.hasOwn(decisions, id) ? decisions[id] : undefined
+  const found = Object.hasOwn(decisions, id) ? decisions[id] : undefined
+  // Kept-warm only records a ping: the agent stays wakeable
+  const decided = found?.decision === 'kept-warm' ? undefined : found
   if (decided) {
     return (
       `fleet: not sent. Agent ${who} is decided ${decided.decision}${decided.note ? ` (${decided.note})` : ''}: a decided agent is never woken, ` +

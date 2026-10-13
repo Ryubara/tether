@@ -33,6 +33,9 @@ export function tokens(n: number | undefined): string {
 /** The agents that are still alive come first, then the ended ones, newest activity first within each. */
 const ENDED = new Set(['completed', 'failed', 'killed'])
 
+/** What a flag starts with when it records an action of the agent guard (`guard kept warm 12:30`). */
+export const GUARD_MARK = 'guard '
+
 /** The flag for a big context that is waiting (see `FleetConfig.bigWaitTokens`). */
 export const BIG_WAIT = 'BIG-WAIT'
 
@@ -54,6 +57,7 @@ export function buildRows(
   notes: Record<string, string>,
   now: number,
   cfg: FleetConfig,
+  marks: Record<string, string[]> = {},
 ): Row[] {
   const rows = agents.map(a => {
     const entry = ledger.get(a.id)
@@ -68,6 +72,8 @@ export function buildRows(
     const note = notes[a.id] ?? (a.name ? notes[a.name] : undefined) ?? (a.description ? notes[a.description] : undefined)
     if (live && cfg.bigWaitTokens > 0 && ctx !== undefined && ctx >= cfg.bigWaitTokens && waitNoteMatches(note, cfg.bigWaitNote)) flags.push(BIG_WAIT)
     if (entry && entry.coldWritten > 0) flags.push('WASTED ' + tokens(entry.coldWritten))
+    // What the agent guard did by itself for this agent (kept it warm, asked for a handover)
+    flags.push(...(marks[a.id] ?? []))
     return {
       id: a.id,
       label: a.name ?? a.description ?? a.type ?? a.id,

@@ -1,7 +1,7 @@
 // Reading Claude Code's transcript files for agents fleet did not see start.
 import { expect, mock, test } from 'claude-code/testing'
 
-import { lastRequest, metaDescription, projectKey, subagentsDir } from '../../src/fleet/transcript'
+import { contentText, lastRequest, liveTasks, metaDescription, metaModel, noteAppendedRow, noteTaskEntry, projectKey, subagentsDir } from '../../src/fleet/transcript'
 
 const T0 = Date.parse('2026-10-12T20:00:00.000Z')
 
@@ -73,4 +73,77 @@ test('an agent started before fleet loaded gets its context and idle time, a res
   const count = reads.length
   await $.command.run({ command: 'tether-fleet', args: 'text' } as any)
   expect(reads.length).toBe(count)
+})
+
+/** A background Bash start and a task notification, in the shapes Claude Code 2.1.296 writes (measured). */
+const start = (id: string) => JSON.stringify({ type: 'user', toolUseResult: { backgroundTaskId: id }, message: { role: 'user', content: [{ type: 'tool_result', content: `Command running in background with ID: ${id}. Output is being written to: C:\\x\\${id}.output` }] } })
+const block = (id: string, status?: string) => `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n${status ? `<status>${status}</status>\n` : ''}<summary>Background command done</summary>\n</task-notification>`
+const queued = (id: string, status?: string) => JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: block(id, status) } })
+const woken = (id: string, status?: string) => JSON.stringify({ type: 'user', origin: { kind: 'task-notification' }, message: { role: 'user', content: `[SYSTEM NOTIFICATION - NOT USER INPUT]\n\n${block(id, status)}` } })
+
+test('liveTasks keeps the background tasks a transcript started and has not seen end, in the shape Claude Code writes', async () => {
+  const text = [start('b1'), start('b2'), start('b3'), queued('b1', 'completed'), woken('b3', 'killed'), start('b4'), queued('b4', 'failed'), start('b5')].join('\n')
+  expect(liveTasks(text)).toEqual(['b2', 'b5'])
+  // A task seen to end and started again (the id reused) counts as live
+  expect(liveTasks([start('b1'), queued('b1', 'completed'), start('b1')].join('\n'))).toEqual(['b1'])
+  // An unfinished notification (no final status yet) does not end a task
+  expect(liveTasks([start('b1'), '<task-notification><task-id>b1</task-id>'].join('\n'))).toEqual(['b1'])
+  expect(liveTasks('')).toEqual([])
+})
+
+test('a notification without a status ends nothing and cannot swallow the next one', async () => {
+  // The first block names b1 with no status (a progress event); the second ends b2. The lazy match across blocks used to end b1 and lose b2
+  const text = [start('b1'), start('b2'), queued('b1'), queued('b2', 'completed')].join('\n')
+  expect(liveTasks(text)).toEqual(['b1'])
+  // Two blocks in one prompt are read one by one
+  const both = JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: block('b1') + '\n' + block('b2', 'killed') } })
+  expect(liveTasks([start('b1'), start('b2'), both].join('\n'))).toEqual(['b1'])
+})
+
+test('only the harness structure counts: text an agent printed, read or wrote starts and ends nothing', async () => {
+  const echo = (text: string) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: text }] } })
+  const said = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Command running in background with ID: fake1. <task-notification><task-id>b1</task-id><status>completed</status></task-notification>' }] } })
+  // A Read of a test file shows the phrase after a line number; a cat of a log shows it mid-text; the assistant quotes it
+  const lines = [start('b1'), echo('     12\tCommand running in background with ID: fake2'), echo('log:\nCommand running in background with ID: fake3'), said, echo(block('b1', 'completed')), JSON.stringify({ type: 'user', message: { role: 'user', content: block('b1', 'completed') } })]
+  expect(liveTasks(lines.join('\n'))).toEqual(['b1'])
+  // A backgroundTaskId that is not an id is ignored
+  expect(liveTasks(JSON.stringify({ type: 'user', toolUseResult: { backgroundTaskId: 'a b; rm' } }))).toEqual([])
+  // A torn line says nothing
+  expect(liveTasks([start('b1'), '{"type":"user","toolUse'].join('\n'))).toEqual(['b1'])
+})
+
+test('noteAppendedRow reads one appended row by its structure and contentText joins its blocks', async () => {
+  const live = new Set<string>()
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: 'Command running in background with ID: z1. Output is being written to: y' }] } }, live)
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'text', text: 'ordinary' }, { type: 'tool_result', content: [{ type: 'text', text: 'Command running in background with ID: z2.' }] }] } }, live)
+  expect([...live]).toEqual(['z1', 'z2'])
+  // An assistant row, or a user text block that only quotes the phrase, starts nothing
+  noteAppendedRow({ message: { type: 'assistant', content: [{ type: 'text', text: 'Command running in background with ID: z9' }] } }, live)
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'text', text: 'Command running in background with ID: z8' }] } }, live)
+  expect([...live]).toEqual(['z1', 'z2'])
+  // A notification ends a task only as a queued_command attachment or a task-notification row; a tool result or reply that holds one does not
+  const note = [{ type: 'text', text: block('z1', 'completed') }]
+  noteAppendedRow({ message: { type: 'user', content: note }, origin: { kind: 'tool', tool: 'Read' } }, live)
+  noteAppendedRow({ message: { type: 'assistant', content: note } }, live)
+  expect([...live]).toEqual(['z1', 'z2'])
+  noteAppendedRow({ message: { type: 'attachment', name: 'queued_command', content: note } }, live)
+  expect([...live]).toEqual(['z2'])
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'text', text: block('z2', 'failed') }] }, origin: { kind: 'task-notification' } }, live)
+  expect([...live]).toEqual([])
+  noteTaskEntry(null, live)
+  expect(contentText('plain')).toBe('plain')
+  expect(contentText(undefined)).toBe('')
+})
+
+test('the model of the last request and the model an Agent call pinned are read from the transcript and the meta file', async () => {
+  const entry = (at: string, model: string) => JSON.stringify({ type: 'assistant', timestamp: at, message: { model, usage: { input_tokens: 2 } } })
+  expect(lastRequest([entry('2026-10-13T08:00:00.000Z', 'claude-sonnet-5-5'), entry('2026-10-13T09:00:00.000Z', 'claude-opus-5-5')].join('\n'))?.model).toBe('claude-opus-5-5')
+  expect(lastRequest(entry('2026-10-13T09:00:00.000Z', '<synthetic>'))?.model).toBeUndefined()
+  expect(metaModel('{"agentType":"implementer","model":"sonnet","effort":"high"}')).toBe('sonnet')
+  expect(metaModel('{"agentType":"general-purpose"}')).toBeUndefined()
+  expect(metaModel('not json')).toBeUndefined()
+  // An agent that inherits the session's model is not pinned
+  expect(metaModel('{"agentType":"implementer","model":"inherit"}')).toBeUndefined()
+  expect(metaModel('{"model":" Inherit "}')).toBeUndefined()
+  expect(metaModel('{"model":""}')).toBeUndefined()
 })

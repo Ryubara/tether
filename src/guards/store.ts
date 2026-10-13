@@ -1,5 +1,5 @@
-// The guards' one store: who owns each open-PR problem, and what was decided about each stopped agent.
-// Both are "somebody has dealt with this" records, so both live in one value kept in $.store.
+// The guards' one store: who owns each open-PR problem, what was decided about each stopped agent, and what
+// Tether itself did for it. All are "somebody has dealt with this" records, so they live in one value kept in $.store.
 
 /** A PR's owner (someone dispatched to fix it) or a waiver (a known wait), valid until `until`. */
 export type Owner = {
@@ -14,8 +14,33 @@ export type Owner = {
   cause?: string
 }
 
-/** What was decided about a stopped agent with a big context. */
-export type Decision = { decision: 'retired' | 'done'; note: string; at: string }
+/**
+ * What was decided about a stopped agent with a big context. `retired` and `done` are final (a decided agent is
+ * never woken); `kept-warm` says the agent was pinged and only quiets the guard for one expiry window, measured
+ * from the later of the agent's last activity and `atMs`, so the agent stays wakeable.
+ */
+export type Decision = { decision: 'retired' | 'done' | 'kept-warm'; note: string; at: string; /** Epoch ms of the record; 0 when unknown (an older store). */ atMs: number }
+
+/** The kinds of problem the guard tells the coordinator about, each told once per cycle. */
+export type AlertKind = 'handover-late' | 'expired' | 'warm-max' | 'still-waiting'
+
+/** What Tether itself did about a stopped agent (the guard's automatic actions). */
+export type AgentAction = {
+  /** Keep-warm messages sent so far in the current run (real work between pings starts a new run). */
+  warms: number
+  /** The agent's context when the last ping went out, to tell real work from the ping's own answer. */
+  warmContext?: number
+  /** When the handover message was sent; absent: none in this cycle (a ping or a kept-warm decision ends the cycle). */
+  handoverAt?: number
+  /** When the leftover background tasks were stopped; the agent is retired once it is quiet after that. */
+  tasksStoppedAt?: number
+  /** How many tasks were stopped, for the retired note. */
+  stoppedCount?: number
+  /** When stopping the agent's leftover background tasks failed; Tether does not retry, the coordinator decides. */
+  stopFailedAt?: number
+  /** When each kind of problem was told to the coordinator; see `alerted` in agents.ts. */
+  alerts: Partial<Record<AlertKind, number>>
+}
 
 /** A rerun of a PR's failed checks that the project's health command reported making; it owns those checks until `until`. */
 export type RerunRecord = {
@@ -35,13 +60,15 @@ export type GuardStore = {
   reruns: Record<string, RerunRecord>
   /** By agent id. */
   decisions: Record<string, Decision>
+  /** By agent id: what the guard did by itself. */
+  actions: Record<string, AgentAction>
 }
 
-export const EMPTY_STORE: GuardStore = { owners: {}, reruns: {}, decisions: {} }
+export const EMPTY_STORE: GuardStore = { owners: {}, reruns: {}, decisions: {}, actions: {} }
 
 /** Reads a stored value into a GuardStore, dropping anything of the wrong shape. */
 export function readStore(raw: unknown): GuardStore {
-  const out: GuardStore = { owners: {}, reruns: {}, decisions: {} }
+  const out: GuardStore = { owners: {}, reruns: {}, decisions: {}, actions: {} }
   if (raw === null || typeof raw !== 'object') return out
   const r = raw as Record<string, unknown>
   for (const [k, v] of Object.entries((r.owners as object) ?? {})) {
@@ -58,7 +85,28 @@ export function readStore(raw: unknown): GuardStore {
   }
   for (const [k, v] of Object.entries((r.decisions as object) ?? {})) {
     const d = v as Partial<Decision> | null
-    if (d && (d.decision === 'retired' || d.decision === 'done')) out.decisions[k] = { decision: d.decision, note: String(d.note ?? ''), at: String(d.at ?? '') }
+    if (d && (d.decision === 'retired' || d.decision === 'done' || d.decision === 'kept-warm')) {
+      out.decisions[k] = { decision: d.decision, note: String(d.note ?? ''), at: String(d.at ?? ''), atMs: typeof d.atMs === 'number' && Number.isFinite(d.atMs) ? d.atMs : 0 }
+    }
+  }
+  for (const [k, v] of Object.entries((r.actions as object) ?? {})) {
+    const a = v as Partial<AgentAction> | null
+    if (!a || typeof a.warms !== 'number') continue
+    const time = (t: unknown) => (typeof t === 'number' && Number.isFinite(t) ? t : undefined)
+    const alerts: AgentAction['alerts'] = {}
+    for (const kind of ['handover-late', 'expired', 'warm-max', 'still-waiting'] as const) {
+      const at = time((a.alerts as Record<string, unknown> | undefined)?.[kind])
+      if (at !== undefined) alerts[kind] = at
+    }
+    out.actions[k] = {
+      warms: a.warms,
+      alerts,
+      ...(time(a.warmContext) !== undefined ? { warmContext: time(a.warmContext) } : {}),
+      ...(time(a.handoverAt) !== undefined ? { handoverAt: time(a.handoverAt) } : {}),
+      ...(time(a.tasksStoppedAt) !== undefined ? { tasksStoppedAt: time(a.tasksStoppedAt) } : {}),
+      ...(time(a.stoppedCount) !== undefined ? { stoppedCount: time(a.stoppedCount) } : {}),
+      ...(time(a.stopFailedAt) !== undefined ? { stopFailedAt: time(a.stopFailedAt) } : {}),
+    }
   }
   return out
 }
@@ -69,10 +117,23 @@ export function recordOwner(store: GuardStore, pr: number, who: string, hours: n
   return { ...store, owners: { ...store.owners, [String(pr)]: owner } }
 }
 
-/** The store with a decision recorded for an agent. */
-export function recordDecision(store: GuardStore, id: string, decision: Decision['decision'], note: string, at: string): GuardStore {
-  return { ...store, decisions: { ...store.decisions, [id]: { decision, note, at } } }
+/** The store with a decision recorded for an agent (`atMs`: when, as epoch ms). */
+export function recordDecision(store: GuardStore, id: string, decision: Decision['decision'], note: string, at: string, atMs = 0): GuardStore {
+  return { ...store, decisions: { ...store.decisions, [id]: { decision, note, at, atMs } } }
 }
+
+/** The store with an agent's action record changed by `change` (a new record starts with no warms; `undefined` clears a field). */
+export function recordAction(store: GuardStore, id: string, change: Partial<AgentAction>): GuardStore {
+  return { ...store, actions: { ...store.actions, [id]: { warms: 0, alerts: {}, ...store.actions[id], ...change } } }
+}
+
+/** The store with problem `kind` recorded as told for an agent at `at`. */
+export function recordAlert(store: GuardStore, id: string, kind: AlertKind, at: number): GuardStore {
+  return recordAction(store, id, { alerts: { ...store.actions[id]?.alerts, [kind]: at } })
+}
+
+/** A new cycle for an agent: a ping or a kept-warm decision ends any handover under way and what it left. */
+export const NEW_CYCLE: Partial<AgentAction> = { handoverAt: undefined, tasksStoppedAt: undefined, stoppedCount: undefined, stopFailedAt: undefined }
 
 /** Whether an owner record is current and covers `cause` (one with no cause covers every cause). */
 export function ownerCovers(owner: Owner | undefined, cause: string, now: number): boolean {

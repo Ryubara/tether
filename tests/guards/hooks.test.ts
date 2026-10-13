@@ -175,13 +175,13 @@ test('a stopped big agent blocks Stop until it is decided', { timeoutMs: 30_000 
   expect(await $.tool.call({ tool: 'SendMessage', to: 'a1', message: '[cache-ok] go on' } as any)).toEqual({ result: 'ok' })
 })
 
-test('the guard demands a decision at 45 minutes and not before', { timeoutMs: 30_000 }, async ($, on) => {
+test('the guard demands a decision 20 minutes before the cache expires and not before', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world({ agents: [{ id: 'a1', status: 'completed', description: 'builder', type: 'general-purpose' }] })
   const clock = await start($, on, { watch: { pollers: [{ id: 'agents', kind: 'agents', everySeconds: 60 }] }, fleet: { bigContextTokens: 1000 } }, w)
   const stream = ($ as any).turn.step({ turnId: 't', index: 0, model: 'm', messageCount: 1, agentId: 'a1' })
   let s = await stream.next()
   while (s.done !== true) s = await stream.next()
-  await clock.advance(40 * MIN)
+  await clock.advance(35 * MIN)
   expect((((await ($ as any).classic.Stop({ stop_hook_active: false })) as any).block)).toBeUndefined()
   await clock.advance(6 * MIN)
   expect(((await ($ as any).classic.Stop({ stop_hook_active: false })) as any).block).toContain('CACHE GUARD')

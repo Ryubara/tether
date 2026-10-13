@@ -8,7 +8,7 @@
 type Kind = 'boolean' | 'number' | 'string'
 
 /** The config sections an option can feed. */
-export type Section = 'checkpoint' | 'fleet' | 'watch' | 'housekeeping' | 'conversations' | 'stop'
+export type Section = 'checkpoint' | 'fleet' | 'watch' | 'housekeeping' | 'conversations' | 'stop' | 'cacheGuard'
 
 /**
  * One option: its name, the section and field it feeds, how to read it, and what the form shows (title,
@@ -37,7 +37,7 @@ export const OPTIONS: Entry[] = [
   { option: 'checkpointMaxRepairs', section: 'checkpoint', field: 'maxRepairs', kind: 'number', title: 'Handoff repair attempts', description: 'Repair attempts before the cycle gives up and the session carries on.', default: 3 },
   { option: 'fleetEnabled', section: 'fleet', field: 'enabled', kind: 'boolean', title: 'Fleet on', description: 'The agents pane, the status line and the SendMessage guard.', default: true },
   { option: 'fleetCacheTtlMinutes', section: 'fleet', field: 'cacheTtlMinutes', kind: 'number', title: 'Agent cache lifetime (minutes)', description: "How long the prompt cache is taken to live after an agent's last request (5, or 60 with subagentPromptCacheTtl 1h). It is also the idle time from which waking an undecided big agent is refused, so a lower value adds a safety margin before the real expiry.", default: 60 },
-  { option: 'fleetBigContextTokens', section: 'fleet', field: 'bigContextTokens', kind: 'number', title: 'Big agent context (tokens)', description: 'Context size from which an agent is guarded: decided when it has been idle long enough, refused a wake-up once its cache has expired.', default: 60_000 },
+  { option: 'fleetBigContextTokens', section: 'fleet', field: 'bigContextTokens', kind: 'number', title: 'Big agent context (tokens)', description: 'Context size from which an agent is guarded: the agent guard acts on it before its cache expires, and a wake-up is refused once its cache has expired.', default: 60_000 },
   { option: 'fleetRetireContextTokens', section: 'fleet', field: 'retireContextTokens', kind: 'number', title: 'Retire agent at (tokens)', description: 'Context size at which an agent is flagged for retirement.', default: 300_000 },
   { option: 'fleetBigWaitTokens', section: 'fleet', field: 'bigWaitTokens', kind: 'number', title: 'BIG-WAIT at (tokens)', description: 'An agent with at least this context and a matching note (see the note pattern) is flagged BIG-WAIT. 0: off.', default: 0 },
   { option: 'fleetBigWaitNote', section: 'fleet', field: 'bigWaitNote', kind: 'string', title: 'BIG-WAIT note pattern', description: "A regular expression matched case-insensitively against the agent's annotation note. Empty: any note.", default: '' },
@@ -64,6 +64,13 @@ export const OPTIONS: Entry[] = [
   { option: 'housekeepingEnforceHandoff', section: 'housekeeping', field: 'enforceHandoff', kind: 'boolean', title: 'Enforce the handoff template', description: 'Refuse a Write of the handoff that fails its check; report an Edit that leaves it failing.', default: true },
   { option: 'conversationsEnabled', section: 'conversations', field: 'enabled', kind: 'boolean', title: 'Conversation logs on', description: 'Write each session to a log under the Tether folder.', default: true },
   { option: 'conversationsMinSeconds', section: 'conversations', field: 'minSeconds', kind: 'number', title: 'Seconds between log writes', description: 'Seconds between log writes while turns complete; a log is always written before a clear.', default: 30 },
+  { option: 'cacheGuardAuto', section: 'cacheGuard', field: 'auto', kind: 'boolean', title: 'Agent guard acts by itself', description: "Before a stopped agent with live background work loses its prompt cache, Tether messages it (keep waiting, or hand over) and stops the leftover background tasks after a handover. Off: it only blocks the end of a turn and asks the model.", default: true },
+  { option: 'cacheGuardLeadMinutes', section: 'cacheGuard', field: 'leadMinutes', kind: 'number', title: 'Agent guard lead (minutes)', description: 'Act this many minutes before the cache expires (at most half the cache lifetime).', default: 20 },
+  { option: 'cacheGuardHandoverTokens', section: 'cacheGuard', field: 'handoverTokens', kind: 'number', title: 'Hand over at (tokens)', description: 'A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm, if it runs on the session model (else it is handed over too).', default: 250_000 },
+  { option: 'cacheGuardHandoverWaitMinutes', section: 'cacheGuard', field: 'handoverWaitMinutes', kind: 'number', title: 'Handover wait (minutes)', description: 'Minutes an agent gets to finish its handover (at most half the lead); later the coordinator is alerted. The agent is never stopped silently.', default: 10 },
+  { option: 'cacheGuardKeepWarmMax', section: 'cacheGuard', field: 'keepWarmMax', kind: 'number', title: 'Keep-warm limit', description: 'Keep-warm messages to one agent in a row (real work between two starts a new run) before the coordinator is asked to decide.', default: 12 },
+  { option: 'cacheGuardKeepWarmText', section: 'cacheGuard', field: 'keepWarmText', kind: 'string', title: 'Keep-warm message', description: 'The message that keeps a waiting agent warm.', default: "Tether cache guard: keep waiting, no action needed. Reply with one word, then wait as before." },
+  { option: 'cacheGuardHandoverText', section: 'cacheGuard', field: 'handoverText', kind: 'string', title: 'Handover message', description: 'The message that asks an agent to hand over and stop.', default: "Tether cache guard: hand over now. Commit your work, update STATUS.md (tip, done, left, running background jobs and their logs or result files, the next exact command), then stop. Do not start new work." },
   { option: 'stopEnabled', section: 'stop', field: 'enabled', kind: 'boolean', title: 'Stop guard on', description: 'Block the end of a turn while PR problems or stopped agents nobody has dealt with are known.', default: true },
   { option: 'stopMaxBlocks', section: 'stop', field: 'maxBlocks', kind: 'number', title: 'Stop guard block limit', description: 'The same block this many times in a row, then let the turn end.', default: 3 },
 ]

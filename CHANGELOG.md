@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.0.0-alpha.20
+
+- Added: the agent guard acts by itself. Once a minute, `cacheGuard.leadMinutes` (default 20, at most half the cache
+  lifetime) before a stopped agent's prompt cache expires, a stopped agent with background work (status `waiting`,
+  or live tasks) is sent a short keep-warm message (`$.session.send`; the reply is a cache read), or, from
+  `cacheGuard.handoverTokens` (default 250k), a handover request (commit, update `STATUS.md`, list background jobs and
+  result files, the next command, then stop). After a handover Tether stops the background tasks the agent left
+  behind (`TaskStop`) and records it `retired`. An agent that does not finish within `cacheGuard.handoverWaitMinutes`
+  (10), tasks `TaskStop` would not stop, a cache that expired before the guard could act, and more than
+  `cacheGuard.keepWarmMax` (12) pings alert the model (toast, log, a wake prompt) and are never stopped silently.
+  `cacheGuard.auto` off keeps only the blocking guard. Seven new options (51 in all), a `cacheGuard` config section,
+  `guard ...` flags in the fleet pane and an action list in `/tether-guards`.
+- Added: the guard never pings an agent that a message would switch to another model. A message wakes a subagent on
+  the session's model unless its Agent call pinned one (measured on 2.1.296 transcripts: 55 of 55 wakes of agents
+  with a `model` in their `.meta.json` kept it; 12 of 12 wakes of unpinned sonnet or haiku agents ran on opus), the
+  cache is per model, and `$.session.send` cannot name a model; so a ping would write a new cache at the session
+  model's rates and leave the agent there. Tether pings only an agent whose `.meta.json` pins a model or whose last
+  request was on the session's model (`$.session.model()`); any other, or one whose model is unknown, gets the
+  handover. The Stop hook's reason says the same for a manual ping.
+- Changed: a model is compared by its normalised name (no `claude-` prefix, date or `[1m]`); a bare family alias such
+  as `opus` matches only itself, never a full id, so an agent on an older opus is handed over, not pinged. A
+  `.meta.json` that says `"model": "inherit"` does not pin the agent.
+- Fixed: the wake the `killed` notification causes after the stops is not a late handover (no `handover-late` alert
+  once the tasks were stopped); the `prs` poller writes the guard store under the same lock as the other writers; a
+  store call that never answers times out after 30 s instead of blocking every later writer; a stuck tick is taken
+  over by the engine clock, and the stuck tick finishing late no longer clears the flag of the tick that replaced it.
+- Added: a handed-over agent is retired only when it is quiet. After the leftover tasks are stopped Tether waits for
+  the agent to settle; one that is still `waiting` (a Monitor or a background Agent Tether cannot identify) is
+  alerted and not recorded `retired`. Before the stops it looks at the agent's status once more.
+- Added: every `session.send` and `TaskStop` has a 30 s timeout, the messages (keep-warm, handover) go out first and
+  together before any alert or stop, and a tick stuck for 5 minutes no longer blocks the next one, so one blocked
+  permission dialog cannot stall the pings due for other agents. The guard store is written under a lock.
+- Changed: background tasks are read from the harness's own structure (`toolUseResult.backgroundTaskId`, a tool
+  result that starts with the start answer, a notification block with a final status in a `queued_command` attachment
+  or a `task-notification` row), never from text an agent printed, read or wrote; a notification block with no status
+  no longer swallows the next one. Tasks seen in a small transcript are kept when it grows past the 4 MB read limit,
+  and tasks Tether stopped are not counted again.
+- Changed: alerts are keyed by kind and cycle (handover late, cache expired, too many pings, still waiting) instead of
+  one permanent "alerted" flag, so a later problem of the same agent is told too. A ping or a `kept-warm` decision
+  ends a handover cycle (its `handoverAt` and leftovers are cleared); the ping limit counts pings in a row, and real
+  work between two (the context grew by 10k) starts a new run. The handover wait is cut to half the lead.
+- Added: `mcp__tether__agent_decision` takes `kept-warm`: the agent was pinged; the warning is quiet for one expiry
+  window counted from the later of its last activity and the record. A kept-warm agent can still be messaged.
+- Changed: `retired` and `done` are refused while the agent is running or has live background work ("TaskStop it
+  first"): it would wake itself and re-write its cache. Tether reads the task ids from the rows appended to the
+  agent's conversation (`session.append`) and from its transcript when under 4 MB.
+- Changed: the Stop hook looks again at the agents when it runs, and its message names the two ways out: keep warm
+  (send a message, record `kept-warm`), or hand over and stop (`TaskStop`, then `retired`). An idle agent is guarded
+  like a completed or waiting one.
+- Removed: the agents poller's `actAfterMinutes` (default 45). The lead time is `cacheGuard.leadMinutes`
+  (`cacheTtlMinutes` less 20 by default); a config that still sets it is read without error and the value is ignored.
+
 ## 1.0.0-alpha.19
 
 - Changed: the agent guard is one rule. A stopped agent with a big context (`fleet.bigContextTokens`) idle for
