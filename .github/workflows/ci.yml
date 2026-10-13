@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Options table matches the manifest and the README
+        run: node --experimental-strip-types scripts/sync-options.mjs --check
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
       - name: Validate the plugin

@@ -23,6 +23,7 @@ import { askText, continueText, describeCycle, initialCycle, newInformation, rep
 import { stopReason as agentStopReason, undecided, type Undecided } from '../src/guards/agents'
 import { GH_FIELDS, fromGh, fromHealth, problemKey, problemLine, stopReason as prStopReason, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
 import { pruneOwners, readStore, recordDecision, recordOwner, type GuardStore } from '../src/guards/store'
+import { layered } from '../src/options/options'
 import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
 import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
 import { logName, renderConversation, type LogMessage } from '../src/conversation/render'
@@ -115,7 +116,7 @@ async function loadConfig($: any): Promise<FleetConfig> {
   const { root, problem } = await readTetherConfig($, true)
   if (problem) $.ui.log(`fleet: ${problem}; using the defaults`)
   // The plugin's option is the default for `enabled`; the project's section overrides it
-  return mergeConfig({ enabled: options.fleetEnabled, ...((root?.fleet as object) ?? {}) })
+  return mergeConfig(layered(options, 'fleet', root?.fleet))
 }
 
 /** Re-reads the agent list and usage, then updates the status line and the pane. */
@@ -454,15 +455,12 @@ const logKey = () => `log:${wcfg.storeName}`
 /** Reads and parses the config file; problems are logged once per load. */
 async function loadWatchConfig($: any, watchReuse = false): Promise<void> {
   const { root, problem } = await readTetherConfig($, watchReuse)
-  const optionEnabled = options.watchEnabled
   if (problem) {
     wcfg = WATCH_DEFAULTS
     problems = [problem]
-  } else if (!root) {
-    wcfg = WATCH_DEFAULTS
-    problems = []
   } else {
-    const parsed = parseConfig({ enabled: optionEnabled, ...((root.watch as object) ?? {}) })
+    // Without a file the options alone are the settings
+    const parsed = parseConfig(layered(options, 'watch', root?.watch))
     wcfg = parsed.config
     problems = parsed.problems
   }
@@ -817,12 +815,7 @@ let cpLine = ''
 /** Reads the checkpoint section of the config and starts the tick. */
 async function checkpointStart($: any): Promise<void> {
   const { root } = await readTetherConfig($, true)
-  cpCfg = mergeCheckpoint({
-    enabled: options.checkpointEnabled,
-    contextTokens: options.checkpointContextTokens,
-    quietSeconds: options.checkpointQuietSeconds,
-    ...((root?.checkpoint as object) ?? {}),
-  })
+  cpCfg = mergeCheckpoint(layered(options, 'checkpoint', root?.checkpoint))
   for (const t of cpTimers) t.cancel()
   cpTimers = cpCfg.enabled ? [$.clock.every(cpCfg.tickSeconds * 1000, () => checkpointTick($)) as any] : []
 }
@@ -1079,9 +1072,9 @@ let lastLogError = ''
 /** Reads the guards', housekeeping and conversation settings. */
 async function guardsStart($: any): Promise<void> {
   const { root } = await readTetherConfig($, true)
-  hkCfg = mergeHousekeeping(root?.housekeeping)
-  convCfg = mergeConversations(root?.conversations)
-  stopCfg = mergeStop(root?.stop)
+  hkCfg = mergeHousekeeping(layered(options, 'housekeeping', root?.housekeeping))
+  convCfg = mergeConversations(layered(options, 'conversations', root?.conversations))
+  stopCfg = mergeStop(layered(options, 'stop', root?.stop))
 }
 
 /** Adds Tether's lines to the repository's exclude file, makes a missing handoff, and reports a failing one. */

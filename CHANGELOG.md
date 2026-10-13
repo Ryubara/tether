@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.0-alpha.12
+
+- **Every scalar setting is a plugin option** (`/plugin configure tether@tether`, 41 in all): the checkpoint's
+  threshold, quiet time, check interval, handoff file, size limit and repair attempts; the fleet's cache lifetime,
+  big and retire context sizes, cold-cache guard and its override token, session display, warning thresholds,
+  refresh, emoji, column tint, watch state file and pane size; watch's wake gap, typing deferral, countdown, box
+  rows, wake line, store name, state file and pane size; housekeeping, conversation logs and the Stop guard.
+  An option is a default for its section and the project file wins field by field; empty text and 0 mean "not
+  set". Structured settings (pollers, annotate, colours, handoff headings, extra exclude lines) stay in the file.
+- Fixed: with no config file, watch ignored its plugin options.
+- One table (`src/options/options.ts`) now feeds the manifest and the README's options table
+  (`node scripts/sync-options.mjs`; CI runs it with `--check`), and a test holds each option's default to the
+  section's own default.
+
 ## 1.0.0-alpha.11
 
 - Fix: `pr_owner` and `agent_decision` returned an object, which Claude Code refuses as a tool result ("does not
