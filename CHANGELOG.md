@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0-alpha.21
+
+- Changed: the subagent max context is one setting. The option `fleetRetireContextTokens` (config key
+  `fleet.retireContextTokens`, default 300000; the name is unchanged, so existing configs keep working) is now titled
+  "Subagent max context (tokens)". The pane flags an agent at this size, and an `agents` poller of watch, which wakes
+  you with "context NNNk, past ...", now wakes at it too: its `contextTokens` falls back to the effective fleet value
+  (the option or the file) instead of a fixed 300000. A poller that sets its own `contextTokens` keeps it. Before, changing
+  the option still left the wake at 300k.
+
 ## 1.0.0-alpha.20
 
 - Added: the agent guard acts by itself. Once a minute, `cacheGuard.leadMinutes` (default 20, at most half the cache

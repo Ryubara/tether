@@ -17,7 +17,9 @@ run inside Claude Code (version 2.1.287 or later). See the
   it and whose annotation note (`fleet.annotate`) matches `fleet.bigWaitNote` (a regular expression, matched
   case-insensitively; empty: any note, but an agent with no note never matches) shows `BIG-WAIT` in the FLAGS
   column, in `/tether-fleet text` and as a count in the status line: it holds a big context while only waiting, so retire
-  it and start a small successor from its status notes. `fleet.usageWarnPercent` (the `!` after a rate limit) is
+  it and start a small successor from its status notes. `fleet.retireContextTokens` (option: Subagent max context,
+  default 300000) is the one size a subagent should not pass: the pane flags an agent at it (`retire`), and an
+  `agents` poller of watch wakes you at it unless that poller sets its own `contextTokens`. `fleet.usageWarnPercent` (the `!` after a rate limit) is
   only shown with `fleet.showSession`, because only then does fleet read the rate limits.
 - **Watch.** Pollers that run inside the session: each finding is told once, and a model turn starts only for
   new findings, never during a turn or while you type. `/tether-watch` only reports (it never stops polling);
@@ -171,7 +173,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `fleetEnabled` | `true` | The agents pane, the status line and the SendMessage guard. |
 | `fleetCacheTtlMinutes` | `60` | How long the prompt cache is taken to live after an agent's last request (5, or 60 with subagentPromptCacheTtl 1h). It is also the idle time from which waking an undecided big agent is refused, so a lower value adds a safety margin before the real expiry. |
 | `fleetBigContextTokens` | `60000` | Context size from which an agent is guarded: the agent guard acts on it before its cache expires, and a wake-up is refused once its cache has expired. |
-| `fleetRetireContextTokens` | `300000` | Context size at which an agent is flagged for retirement. |
+| `fleetRetireContextTokens` | `300000` | The context size a subagent should not pass. The pane flags an agent at this size, and the watch agents poller wakes you at this size unless that poller sets its own contextTokens. |
 | `fleetBigWaitTokens` | `0` | An agent with at least this context and a matching note (see the note pattern) is flagged BIG-WAIT. 0: off. |
 | `fleetBigWaitNote` | (empty) | A regular expression matched case-insensitively against the agent's annotation note. Empty: any note. |
 | `fleetColdGuard` | `true` | Refuse SendMessage to an agent with a recorded decision, and to an undecided big agent whose cache has expired, unless the message starts with the override token. |

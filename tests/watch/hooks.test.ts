@@ -53,6 +53,10 @@ async function start($: any, on: any, config: unknown, world: World) {
     world.files[e.path] = e.text
     return { value: undefined }
   })
+  // Every request is a 250k-context one (see bigStep)
+  on('turn.step', async function* ($: any, e: any) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { input_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 250_000 } }
+  })
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({ value: [] }))
@@ -189,4 +193,29 @@ test('/tether-watch pane draws a box per poller with its countdown and findings'
   expect(texts.some((t: string) => /^[0-9][0-9]:[0-9][0-9] #7 conflict with main$/.test(t))).toBe(true)
   // The box is as tall as boxRows: the default six log lines under the title
   expect(texts.filter((t: string) => t === ' ').length).toBeGreaterThanOrEqual(5)
+})
+
+/** Fires one 250k-context request for an agent and reads the stream to its end. */
+async function bigStep($: any, agentId: string) {
+  const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-test', messageCount: 1, agentId })
+  let s = await stream.next()
+  while (s.done !== true) s = await stream.next()
+}
+
+test('the agents poller wakes at the subagent max context option, not at 300k', { timeoutMs: 30_000, options: { fleetRetireContextTokens: 200_000 } }, async ($, on) => {
+  const w = world('')
+  w.agents = [{ id: 'a1', status: 'running', description: 'builder', type: 'general-purpose' }]
+  const clock = await start($, on, { pollers: [{ id: 'agents', kind: 'agents', title: 'Agents', everySeconds: 60 }] }, w)
+  await bigStep($, 'a1')
+  await clock.advance(2 * MIN)
+  expect(w.submits).toEqual(['watch found something new. Handle it or say why it can wait:\n\nAgents:\n- builder (a1) context 250k, past 200k'])
+})
+
+test('an agents poller with its own contextTokens ignores the subagent max context option', { timeoutMs: 30_000, options: { fleetRetireContextTokens: 200_000 } }, async ($, on) => {
+  const w = world('')
+  w.agents = [{ id: 'a1', status: 'running', description: 'builder', type: 'general-purpose' }]
+  const clock = await start($, on, { pollers: [{ id: 'agents', kind: 'agents', title: 'Agents', everySeconds: 60, contextTokens: 400_000 }] }, w)
+  await bigStep($, 'a1')
+  await clock.advance(2 * MIN)
+  expect(w.submits).toEqual([])
 })

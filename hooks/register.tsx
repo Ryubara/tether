@@ -463,7 +463,8 @@ async function loadWatchConfig($: any, watchReuse = false): Promise<void> {
     problems = [problem]
   } else {
     // Without a file the options alone are the settings
-    const parsed = parseConfig(layered(options, 'watch', root?.watch))
+    // An agents poller without its own contextTokens wakes at the subagent max context, the fleet setting
+    const parsed = parseConfig(layered(options, 'watch', root?.watch), mergeConfig(layered(options, 'fleet', root?.fleet)).retireContextTokens)
     wcfg = parsed.config
     problems = parsed.problems
   }

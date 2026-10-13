@@ -30,8 +30,7 @@
         "kind": "agents",
         "title": "Subagents",
         "everySeconds": 60,
-        "silentMinutes": 45,
-        "contextTokens": 300000
+        "silentMinutes": 45
       },
       {
         "id": "prs",

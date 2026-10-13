@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.20",
+  "version": "1.0.0-alpha.21",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -91,8 +91,8 @@
     },
     "fleetRetireContextTokens": {
       "type": "number",
-      "title": "Retire agent at (tokens)",
-      "description": "Context size at which an agent is flagged for retirement.",
+      "title": "Subagent max context (tokens)",
+      "description": "The context size a subagent should not pass. The pane flags an agent at this size, and the watch agents poller wakes you at this size unless that poller sets its own contextTokens.",
       "default": 300000
     },
     "fleetBigWaitTokens": {
