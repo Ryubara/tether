@@ -3,8 +3,8 @@
 import { expect, test } from 'claude-code/testing'
 
 import { stopReason as agentStop, undecided } from '../../src/guards/agents'
-import { fromGh, fromHealth, problemKey, problemLine, stopReason, unowned, unpushedProblem } from '../../src/guards/prs'
-import { EMPTY_STORE, ownerCovers, pruneOwners, readStore, recordDecision, recordOwner } from '../../src/guards/store'
+import { fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason, toldProblems, unowned, unpushedProblem } from '../../src/guards/prs'
+import { EMPTY_STORE, ownerCovers, pruneOwners, readStore, recordDecision, recordOwner, recordRerun } from '../../src/guards/store'
 import { parseConfig, type AgentsPoller, type PrsPoller } from '../../src/watch/config'
 import { agentFindings } from '../../src/watch/findings'
 
@@ -103,8 +103,35 @@ test('the agents poller adds undecided agents when given the guard, and prs poll
   const agents = config.pollers[0] as AgentsPoller
   const prs = config.pollers[1] as PrsPoller
   expect([agents.actAfterMinutes, agents.forgetAgentMinutes]).toEqual([30, 180])
-  expect([prs.command, prs.requireAutoMerge, prs.ignoreDrafts, prs.worktrees, prs.assignHours, prs.stuckMinutes, prs.everySeconds]).toEqual([['x'], true, true, 'wt', 2, 90, 300])
+  expect([prs.command, prs.requireAutoMerge, prs.ignoreDrafts, prs.worktrees, prs.assignHours, prs.rerunHours, prs.stuckMinutes, prs.everySeconds]).toEqual([['x'], true, true, 'wt', 2, 3, 90, 300])
   const seen = [{ id: 'a1', status: 'completed', label: 'worker', lastStepAt: NOW - 50 * MIN, contextTokens: 100_000 }]
   expect(agentFindings(agents, seen, NOW)).toEqual([])
   expect(agentFindings(agents, seen, NOW, { store: EMPTY_STORE, cacheMinutes: 60, smallTokens: 60_000 }).map(f => f.key)).toEqual(['a1|undecided'])
+})
+
+test('rerunsFromHealth reads well-formed entries and rerunInfo makes information lines that never block', async () => {
+  const heads = new Map([[7, { branch: 'fix-x', sha: 'abc' }]])
+  const reruns = rerunsFromHealth({ rerun: [{ number: 7, run: 5, checks: ['b', 'a'], reasons: ['r1', 'r2'], status: 'would-rerun', detail: '', future: 1 }, { number: 8 }, { status: 'x' }, null] })
+  expect(reruns).toEqual([{ number: 7, run: 5, checks: ['a', 'b'], reasons: ['r1', 'r2'], status: 'would-rerun' }])
+  expect(rerunsFromHealth({ stuck: [] })).toEqual([])
+  const info = rerunInfo(reruns, heads)
+  expect(info).toEqual([{ number: 7, branch: 'fix-x', cause: 'rerun-would-rerun', text: 'rerun a, b (run 5) would-rerun: r1; r2', sha: 'abc', extra: '5:a,b', info: true }])
+  // Information lines are never unowned, but are told
+  expect(unowned(info, EMPTY_STORE, NOW)).toEqual([])
+  expect(toldProblems(info, EMPTY_STORE, NOW).length).toBe(1)
+})
+
+test('a recorded rerun owns a failed-checks problem only for the checks it reran, the same head, and until it expires', async () => {
+  const failed = { number: 7, branch: 'b', cause: 'checks-failed', text: 'checks-failed', sha: 'abc', extra: 'a,b' }
+  const store = recordRerun(EMPTY_STORE, 7, 'abc', ['b', 'a', 'c'], 3, NOW)
+  expect(unowned([failed], store, NOW + MIN)).toEqual([])
+  // A check the rerun did not cover, a new head, other causes, another PR, and the end of the rerun's hours
+  expect(unowned([{ ...failed, extra: 'a,z' }], store, NOW + MIN).length).toBe(1)
+  expect(unowned([{ ...failed, sha: 'def' }], store, NOW + MIN).length).toBe(1)
+  expect(unowned([{ ...failed, cause: 'conflict' }], store, NOW + MIN).length).toBe(1)
+  expect(unowned([{ ...failed, number: 8 }], store, NOW + MIN).length).toBe(1)
+  expect(unowned([failed], store, NOW + 4 * 60 * MIN).length).toBe(1)
+  expect(unowned([{ ...failed, extra: '' }], store, NOW + MIN).length).toBe(1)
+  expect(Object.keys(pruneOwners(store, NOW + 4 * 60 * MIN).reruns)).toEqual([])
+  expect(readStore(JSON.parse(JSON.stringify(store))).reruns['7']?.checks).toEqual(['a', 'b', 'c'])
 })

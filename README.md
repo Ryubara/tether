@@ -29,9 +29,18 @@ run inside Claude Code (version 2.1.287 or later). See the
 
 - **PR guard.** A `prs` poller tells each problem with an open pull request that nobody owns: a conflict, failed
   checks, CI that seems stuck, auto-merge off (opt in), or work in a worktree that was never pushed. By default it
-  reads GitHub with `gh`; `command` swaps in the project's own health command (its JSON is `{ "stuck": [...] }`). The command
+  reads GitHub with `gh`; `command` swaps in the project's own health command (its JSON is `{ "stuck": [...], "rerun": [...] }`). The command
   may exit 1 to say "something is stuck": `okExitCodes` (default `[0, 1]`) lists the exit codes whose output is read;
   any other code (or output that is not JSON) is an error shown in `/watch`, never a quiet pass.
+  The optional `rerun` list says what the command did about failed checks. Each entry is told as an information
+  line (never an owner, never blocks Stop) and has these fields; unknown fields are ignored and a project with no
+  `rerun` key is unaffected:
+  `number` (the PR), `branch`, `run` (the workflow run), `checks` (the failed checks, sorted), `reasons` (why each
+  check was chosen, in the order of `checks`), `status` and `detail` (why a rerun was refused or capped, empty
+  otherwise). With status `would-rerun` or `reran` the rerun owns that PR's `checks-failed` problem, as long as
+  every failing check is among `checks` and the head commit is unchanged, for the poller's `rerunHours` (default
+  3); with `refused`, `capped` or `new-event` the rerun cannot fix it, so the problem stays unowned and the
+  line's `detail` says why.
   The model records an owner (`assign`, a few hours) or a known wait (`waive`, optionally for one cause) with the
   `mcp__tether__pr_owner` tool; an expired owner raises the problem again.
 - **Agent guard.** The agents poller also tells stopped agents with a big context that nobody has decided about

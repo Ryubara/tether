@@ -41,7 +41,8 @@
         "stuckMinutes": 90,
         "requireAutoMerge": false,
         "ignoreDrafts": true,
-        "assignHours": 4
+        "assignHours": 4,
+        "rerunHours": 3
       }
     ]
   },

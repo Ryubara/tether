@@ -17,24 +17,43 @@ export type Owner = {
 /** What was decided about a stopped agent with a big context. */
 export type Decision = { decision: 'retired' | 'done'; note: string; at: string }
 
+/** A rerun of a PR's failed checks that the project's health command reported making; it owns those checks until `until`. */
+export type RerunRecord = {
+  pr: number
+  /** The head commit the rerun was for; `?` when unknown (then any head matches). */
+  sha: string
+  /** The checks that were rerun. */
+  checks: string[]
+  /** Epoch ms after which the rerun no longer owns the problem, finished or not. */
+  until: number
+}
+
 export type GuardStore = {
   /** By PR number as text. */
   owners: Record<string, Owner>
+  /** By PR number as text: the latest rerun the health command reported for it. */
+  reruns: Record<string, RerunRecord>
   /** By agent id. */
   decisions: Record<string, Decision>
 }
 
-export const EMPTY_STORE: GuardStore = { owners: {}, decisions: {} }
+export const EMPTY_STORE: GuardStore = { owners: {}, reruns: {}, decisions: {} }
 
 /** Reads a stored value into a GuardStore, dropping anything of the wrong shape. */
 export function readStore(raw: unknown): GuardStore {
-  const out: GuardStore = { owners: {}, decisions: {} }
+  const out: GuardStore = { owners: {}, reruns: {}, decisions: {} }
   if (raw === null || typeof raw !== 'object') return out
   const r = raw as Record<string, unknown>
   for (const [k, v] of Object.entries((r.owners as object) ?? {})) {
     const o = v as Partial<Owner> | null
     if (o && typeof o.until === 'number' && typeof o.who === 'string') {
       out.owners[k] = { until: o.until, who: o.who, note: String(o.note ?? ''), at: String(o.at ?? ''), ...(o.cause ? { cause: o.cause } : {}) }
+    }
+  }
+  for (const [k, v] of Object.entries((r.reruns as object) ?? {})) {
+    const x = v as Partial<RerunRecord> | null
+    if (x && typeof x.pr === 'number' && typeof x.until === 'number' && Array.isArray(x.checks)) {
+      out.reruns[k] = { pr: x.pr, sha: typeof x.sha === 'string' ? x.sha : '?', checks: x.checks.filter(c => typeof c === 'string'), until: x.until }
     }
   }
   for (const [k, v] of Object.entries((r.decisions as object) ?? {})) {
@@ -61,8 +80,26 @@ export function ownerCovers(owner: Owner | undefined, cause: string, now: number
   return !owner.cause || owner.cause === cause
 }
 
-/** The store without expired owners, so it does not grow for ever. */
+/** The store with a rerun recorded for a PR (the latest replaces the earlier), owning its checks for `hours`. */
+export function recordRerun(store: GuardStore, pr: number, sha: string, checks: string[], hours: number, now: number): GuardStore {
+  const record: RerunRecord = { pr, sha, checks: [...checks].sort(), until: now + hours * 3_600_000 }
+  return { ...store, reruns: { ...store.reruns, [String(pr)]: record } }
+}
+
+/**
+ * Whether a recorded, unexpired rerun owns a failed-checks problem: there are failing checks, every one of
+ * them was rerun, and the head commit is the one rerun (when both are known).
+ */
+export function rerunCovers(record: RerunRecord | undefined, cause: string, failed: string[], sha: string, now: number): boolean {
+  if (!record || record.until <= now || cause !== 'checks-failed' || failed.length === 0) return false
+  if (record.sha !== '?' && sha !== '?' && record.sha !== sha) return false
+  return failed.every(c => record.checks.includes(c))
+}
+
+/** The store without expired owners and reruns, so it does not grow for ever. */
 export function pruneOwners(store: GuardStore, now: number): GuardStore {
   const owners = Object.fromEntries(Object.entries(store.owners).filter(([, o]) => o.until > now))
-  return Object.keys(owners).length === Object.keys(store.owners).length ? store : { ...store, owners }
+  const reruns = Object.fromEntries(Object.entries(store.reruns).filter(([, x]) => x.until > now))
+  if (Object.keys(owners).length === Object.keys(store.owners).length && Object.keys(reruns).length === Object.keys(store.reruns).length) return store
+  return { ...store, owners, reruns }
 }

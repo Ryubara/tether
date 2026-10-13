@@ -21,8 +21,8 @@ import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../
 import { handoffProblems } from '../src/checkpoint/handoff'
 import { askText, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 import { stopReason as agentStopReason, undecided, type Undecided } from '../src/guards/agents'
-import { GH_FIELDS, fromGh, fromHealth, problemKey, problemLine, stopReason as prStopReason, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
-import { pruneOwners, readStore, recordDecision, recordOwner, type GuardStore } from '../src/guards/store'
+import { ACTIVE_RERUN, GH_FIELDS, fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
+import { pruneOwners, readStore, recordDecision, recordOwner, recordRerun, type GuardStore } from '../src/guards/store'
 import { layered } from '../src/options/options'
 import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
 import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
@@ -963,19 +963,26 @@ async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]
     const heads = new Map(list.map(x => [x.number, { branch: x.headRefName, sha: x.headRefOid }]))
     const now = await $.clock.now()
     let found: Problem[]
+    let reruns: ReturnType<typeof rerunsFromHealth> = []
     if (p.command) {
       const r = await run(p.command, p.timeoutMs)
       if (!p.okExitCodes.includes(r.exitCode)) return { error: `health command: exit ${r.exitCode}` }
-      found = fromHealth(JSON.parse(r.stdout), heads)
+      const data = JSON.parse(r.stdout)
+      found = fromHealth(data, heads)
+      reruns = rerunsFromHealth(data)
+      found = [...found, ...rerunInfo(reruns, heads)]
     } else {
       found = fromGh(list, { stuckMinutes: p.stuckMinutes, requireAutoMerge: p.requireAutoMerge, ignoreDrafts: p.ignoreDrafts }, now)
     }
     if (p.worktrees) found = [...found, ...(await unpushedIn($, p, heads))]
     lastProblems = found
+    // A rerun the command says it made (or would make) owns that PR's failed checks for `rerunHours`.
     const store = await guardStore($)
-    const pruned = pruneOwners(store, now)
+    let recorded = store
+    for (const x of reruns) if (ACTIVE_RERUN.has(x.status)) recorded = recordRerun(recorded, x.number, heads.get(x.number)?.sha ?? '?', x.checks, p.rerunHours, now)
+    const pruned = pruneOwners(recorded, now)
     if (pruned !== store) await saveGuardStore($, pruned)
-    return { findings: unowned(found, pruned, now).map(x => ({ key: problemKey(x), text: problemLine(x) })) }
+    return { findings: toldProblems(found, pruned, now).map(x => ({ key: problemKey(x), text: problemLine(x) })) }
   } catch (err) {
     return { error: String(err) }
   }
@@ -1053,8 +1060,10 @@ async function guardsReport($: any): Promise<string> {
   const now = await $.clock.now()
   const store = await guardStore($)
   const open = unowned(lastProblems, store, now)
-  const lines = [`guards: ${lastProblems.length} PR problem${lastProblems.length === 1 ? '' : 's'} at the last poll, ${open.length} without an owner`]
+  const real = lastProblems.filter(p => !p.info)
+  const lines = [`guards: ${real.length} PR problem${real.length === 1 ? '' : 's'} at the last poll, ${open.length} without an owner`]
   for (const p of open) lines.push(`- #${p.number} ${p.branch}: ${p.text}`)
+  for (const p of lastProblems.filter(x => x.info)) lines.push(`info: #${p.number} ${p.branch}: ${p.text}`)
   for (const [pr, o] of Object.entries(store.owners)) {
     if (o.until > now) lines.push(`owner #${pr}: ${o.who}${o.cause ? ` (${o.cause})` : ''} for ${Math.round((o.until - now) / 3_600_000)} h more, ${o.note}`)
   }

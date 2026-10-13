@@ -63,7 +63,7 @@ export type AgentsPoller = {
 /**
  * A poller over the project's open pull requests (the PR guard). A problem with no owner is a finding; the
  * model records an owner or a waiver with the tether pr_owner tool. By default it reads GitHub with `gh`;
- * a `command` replaces that read with the project's own (its JSON is `{ "stuck": [...] }`).
+ * a `command` replaces that read with the project's own (its JSON is `{ "stuck": [...], "rerun": [...] }`).
  */
 export type PrsPoller = {
   kind: 'prs'
@@ -88,6 +88,8 @@ export type PrsPoller = {
   busyMarker?: string
   /** How long an `assign` lasts, in hours. */
   assignHours: number
+  /** How long a rerun the health command reports (status `would-rerun` or `reran`) owns its PR's failed checks, in hours. */
+  rerunHours: number
   dedupe: boolean
   forgetMinutes: number
   wake: boolean
@@ -211,6 +213,7 @@ function poller(raw: unknown, i: number, problems: string[]): Poller | undefined
       ...(text(r.worktrees) ? { worktrees: text(r.worktrees) } : {}),
       ...(text(r.busyMarker) ? { busyMarker: text(r.busyMarker) } : {}),
       assignHours: num(r.assignHours, 4),
+      rerunHours: num(r.rerunHours, 3),
     }
   }
   if (r.kind !== undefined && r.kind !== 'command') {

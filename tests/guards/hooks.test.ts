@@ -207,3 +207,35 @@ test('a conversation log is written after a turn, whole, under the folder', { ti
   expect(w.files[path!]).toContain('## 1. Fix the bug')
   expect(w.files[path!]).toContain('- Read: a.ts')
 })
+
+const FAILED = { stuck: [{ number: 12, branch: 'fix-x', cause: 'checks-failed', checks: ['lint', 'build'] }] }
+
+test('a rerun the health command made is told as information and owns the failed checks', { timeoutMs: 30_000 }, async ($, on) => {
+  const config = { watch: { pollers: [{ id: 'prs', kind: 'prs', everySeconds: 300, command: ['health'] }] } }
+  const health = { ...FAILED, rerun: [{ number: 12, branch: 'fix-x', run: 99, checks: ['build', 'lint'], reasons: ['infra', 'infra'], status: 'reran', detail: '', other: 1 }] }
+  const w = world({ prs: CONFLICT, health: { stdout: JSON.stringify(health), exitCode: 1 } })
+  const clock = await start($, on, config, w)
+  await clock.advance(3 * SEC)
+  // The info line is told; the failed-checks problem is owned by the rerun, so it is not
+  expect(w.submits.length).toBe(1)
+  expect(w.submits[0]).toContain('#12 fix-x: rerun build, lint (run 99) reran: infra; infra')
+  expect(w.submits[0]).not.toContain('checks-failed')
+  const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
+  expect(stop.block).toBeUndefined()
+  const report: any = await $.command.run({ command: 'guards' } as any)
+  expect(report.text).toContain('0 without an owner')
+  expect(report.text).toContain('info: #12 fix-x: rerun build, lint (run 99) reran: infra; infra')
+})
+
+test('a rerun that cannot fix the problem is told but owns nothing, and the rerun owns only the checks it reran', { timeoutMs: 30_000 }, async ($, on) => {
+  const config = { watch: { pollers: [{ id: 'prs', kind: 'prs', everySeconds: 300, command: ['health'] }] } }
+  const skipped = { ...FAILED, rerun: [{ number: 12, run: 98, checks: ['lint', 'build'], reasons: ['x', 'y'], status: 'refused', detail: 'not flaky' }] }
+  const w = world({ prs: CONFLICT, health: { stdout: JSON.stringify(skipped), exitCode: 1 } })
+  const clock = await start($, on, config, w)
+  await clock.advance(3 * SEC)
+  expect(w.submits[0]).toContain('rerun build, lint (run 98) refused: not flaky')
+  expect(w.submits[0]).toContain('#12 fix-x: checks-failed')
+  const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
+  expect(stop.block).toContain('#12 fix-x: checks-failed')
+  expect(stop.block).not.toContain('rerun build')
+})
