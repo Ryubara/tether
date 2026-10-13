@@ -1,18 +1,57 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.3",
+  "version": "1.0.0-alpha.4",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
-  "author": { "name": "Ryubara", "url": "https://github.com/Ryubara" },
+  "author": {
+    "name": "Ryubara",
+    "url": "https://github.com/Ryubara"
+  },
   "homepage": "https://github.com/Ryubara/tether",
   "repository": "https://github.com/Ryubara/tether",
   "license": "MIT",
-  "keywords": ["subagents", "prompt-cache", "handoff", "checkpoint", "watch"],
+  "keywords": [
+    "subagents",
+    "prompt-cache",
+    "handoff",
+    "checkpoint",
+    "watch"
+  ],
   "userConfig": {
     "configPath": {
       "type": "string",
       "title": "Config file",
       "description": "Path of Tether's JSON config. Empty: .claude/tether.json in the session's folder.",
       "default": ""
+    },
+    "checkpointEnabled": {
+      "type": "boolean",
+      "title": "Checkpoint on",
+      "description": "Ask for a handoff, check it, clear and continue when the session is long and quiet.",
+      "default": false
+    },
+    "checkpointContextTokens": {
+      "type": "number",
+      "title": "Checkpoint at this many tokens",
+      "description": "The main session context at which a checkpoint is due.",
+      "default": 200000
+    },
+    "checkpointQuietSeconds": {
+      "type": "number",
+      "title": "Quiet seconds before a checkpoint",
+      "description": "Seconds with no turn, no draft and no new message before the checkpoint acts.",
+      "default": 90
+    },
+    "fleetEnabled": {
+      "type": "boolean",
+      "title": "Fleet on",
+      "description": "The agents pane, the status line and the SendMessage guard.",
+      "default": true
+    },
+    "watchEnabled": {
+      "type": "boolean",
+      "title": "Watch on",
+      "description": "The pollers and the findings they wake the model for.",
+      "default": true
     }
   }
 }

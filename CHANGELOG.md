@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-alpha.4
+
+- The main settings are plugin options: `/plugin configure tether@tether` sets checkpoint on or off, the checkpoint
+  threshold and quiet time, and the fleet and watch switches.
+- Precedence: the project file (`.claude/tether.json`) overrides the plugin options, which override the defaults.
+
 ## 1.0.0-alpha.3
 
 - **Checkpoint cycle** (off by default: `"checkpoint": { "enabled": true }`). When the main session's context

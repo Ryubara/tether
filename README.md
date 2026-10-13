@@ -39,6 +39,10 @@ Then set the config with `/plugin configure tether@tether` (the `configPath` opt
 
 ## Config
 
+Set the common options with `/plugin configure tether@tether`: checkpoint on or off, the checkpoint threshold
+and quiet time, and the fleet and watch switches. A project file overrides them: `.claude/tether.json` (or the
+`configPath` option) takes a `fleet`, `watch` and `checkpoint` section, and its values win over the options.
+
 One JSON file, one section per part (`fleet`, `watch`). Every key is optional; the defaults are in
 `src/fleet/config.ts` and `src/watch/config.ts`. Colours, column tints and emoji are fleet keys
 (`colors`, `columnTint`, `emoji`). `enabled` (default `true`) turns a whole section off.

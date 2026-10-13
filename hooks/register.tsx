@@ -107,7 +107,8 @@ async function readTetherFile($: any): Promise<{ root?: Record<string, unknown>;
 async function loadConfig($: any): Promise<FleetConfig> {
   const { root, problem } = await readTetherConfig($, true)
   if (problem) $.ui.log(`fleet: ${problem}; using the defaults`)
-  return root ? mergeConfig(root.fleet ?? {}) : DEFAULTS
+  // The plugin's option is the default for `enabled`; the project's section overrides it
+  return mergeConfig({ enabled: options.fleetEnabled, ...((root?.fleet as object) ?? {}) })
 }
 
 /** Re-reads the agent list and usage, then updates the status line and the pane. */
@@ -441,6 +442,7 @@ const logKey = () => `log:${wcfg.storeName}`
 /** Reads and parses the config file; problems are logged once per load. */
 async function loadWatchConfig($: any, watchReuse = false): Promise<void> {
   const { root, problem } = await readTetherConfig($, watchReuse)
+  const optionEnabled = options.watchEnabled
   if (problem) {
     wcfg = WATCH_DEFAULTS
     problems = [problem]
@@ -448,7 +450,7 @@ async function loadWatchConfig($: any, watchReuse = false): Promise<void> {
     wcfg = WATCH_DEFAULTS
     problems = []
   } else {
-    const parsed = parseConfig(root.watch ?? {})
+    const parsed = parseConfig({ enabled: optionEnabled, ...((root.watch as object) ?? {}) })
     wcfg = parsed.config
     problems = parsed.problems
   }
@@ -784,6 +786,8 @@ const registerWatch: Register = (on, options) => {
 
 const CHECKPOINT_CONTINUE_KEY = 'checkpoint:continue'
 let cpCfg: CheckpointConfig = CHECKPOINT_DEFAULTS
+/** The plugin's options (`/plugin configure tether@tether`): the defaults the project file overrides. */
+let options: Record<string, unknown> = {}
 let cpState: CycleState = initialCycle()
 let cpTimers: Array<{ cancel: () => void }> = []
 /** One tick at a time: a tick awaits the prompt and the clear, and the next must not start meanwhile. */
@@ -792,7 +796,12 @@ let cpTicking = false
 /** Reads the checkpoint section of the config and starts the tick. */
 async function checkpointStart($: any): Promise<void> {
   const { root } = await readTetherConfig($, true)
-  cpCfg = mergeCheckpoint(root?.checkpoint ?? {})
+  cpCfg = mergeCheckpoint({
+    enabled: options.checkpointEnabled,
+    contextTokens: options.checkpointContextTokens,
+    quietSeconds: options.checkpointQuietSeconds,
+    ...((root?.checkpoint as object) ?? {}),
+  })
   for (const t of cpTimers) t.cancel()
   cpTimers = cpCfg.enabled ? [$.clock.every(cpCfg.tickSeconds * 1000, () => checkpointTick($)) as any] : []
 }
@@ -869,9 +878,10 @@ async function checkpointAfterClear($: any): Promise<void> {
   $.clock.after(1000, () => $.prompt.submit({ text: continueText(cpCfg) }))
 }
 
-export const register: Register = (on, options) => {
-  registerFleet(on, options)
-  registerWatch(on, options)
+export const register: Register = (on, opts) => {
+  options = (opts ?? {}) as Record<string, unknown>
+  registerFleet(on, opts)
+  registerWatch(on, opts)
 
   on('session.start', async ($, e, next) => {
     await checkpointStart($)
