@@ -102,6 +102,29 @@ export function isCyclePrompt(text: string, cfg: CheckpointConfig): boolean {
   )
 }
 
+/**
+ * How many messages are new information: every message with text, from you or from the main agent, except
+ * the cycle's own prompts and the reply to each one (that reply only says the handoff is written).
+ */
+export function newInformation(messages: Array<{ role: string; text?: string }>, cfg: CheckpointConfig): number {
+  let n = 0
+  let awaitingReply = false
+  for (const m of messages) {
+    const text = (m.text ?? '').trim()
+    if (text === '') continue
+    if (m.role === 'user' && isCyclePrompt(text, cfg)) {
+      awaitingReply = true
+      continue
+    }
+    if (m.role === 'assistant' && awaitingReply) {
+      awaitingReply = false
+      continue
+    }
+    n++
+  }
+  return n
+}
+
 /** The prompt sent after the clear, so the new session picks the work up at once. */
 export function continueText(cfg: CheckpointConfig): string {
   return `Continue from ${cfg.handoffFile}.`

@@ -18,7 +18,7 @@ import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type Watch
 import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems } from '../src/checkpoint/handoff'
-import { askText, continueText, initialCycle, isCyclePrompt, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
+import { askText, continueText, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 
 // ---- FLEET ----
 // fleet: see the session's agents and what they cost, and refuse waking a big agent on a cold cache.
@@ -817,10 +817,8 @@ async function checkpointTick($: any): Promise<void> {
     const contextTokens = ledger.get('main')?.contextTokens ?? 0
     // Messages and the handoff are read only once a handoff is in progress; an idle session needs neither
     const inProgress = cpState.phase !== 'idle'
-    // Only the person's own messages are new information: not the cycle's prompts, the model's replies or tool results
-    const messages = inProgress
-      ? ((await $.session.messages()) as Array<{ role: string; text?: string }>).filter(m => m.role === 'user' && (m.text ?? '').trim() !== '' && !isCyclePrompt(String(m.text), cpCfg)).length
-      : 0
+    // New information: the person's and the main agent's messages, not the cycle's own prompts or their replies
+    const messages = inProgress ? newInformation((await $.session.messages()) as Array<{ role: string; text?: string }>, cpCfg) : 0
     const problems = inProgress ? await handoffCheck($) : []
     const observed: Observed = { now, contextTokens, busy, draft, messages, problems }
     const { state, action } = cycleStep(cpState, observed, cpCfg)

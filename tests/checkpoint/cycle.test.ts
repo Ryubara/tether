@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../../src/checkpoint/config'
 import { handoffProblems } from '../../src/checkpoint/handoff'
-import { askText, initialCycle, isCyclePrompt, repairText, step, type Observed } from '../../src/checkpoint/cycle'
+import { askText, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
 
 const cfg: CheckpointConfig = { ...CHECKPOINT_DEFAULTS, enabled: true, contextTokens: 1000, quietSeconds: 10, maxRepairs: 2 }
 const GOOD = '## Where to look\nx\n## Summary\nx\n## Next steps\nx\n## Open questions\nx\n'
@@ -96,6 +96,21 @@ test('the cycle recognises its own prompts, so they never re-queue it; a person\
   expect(isCyclePrompt('Continue from HANDOFF.md.', cfg)).toBe(true)
   expect(isCyclePrompt('Update the README for me', cfg)).toBe(false)
   expect(isCyclePrompt('the build is green, go on', cfg)).toBe(false)
+})
+
+test('new information is the person\'s and the main agent\'s messages, not the cycle\'s prompts or their replies', () => {
+  const msgs = [
+    { role: 'user', text: 'fix the build' },
+    { role: 'assistant', text: 'on it' },
+    { role: 'user', text: askText(cfg, false) },
+    { role: 'assistant', text: '' },
+    { role: 'assistant', text: 'HANDOFF.md is written.' },
+    { role: 'user', text: 'and also the tests' },
+    { role: 'assistant', text: 'the subagent reported the build is green' },
+  ]
+  // four counted: the first request, the main agent's reply to it, the follow-up, and the subagent's report
+  expect(newInformation(msgs, cfg)).toBe(4)
+  expect(newInformation(msgs.slice(0, 3), cfg)).toBe(2)
 })
 
 test('the defaults wait five quiet seconds, checked every two', () => {
