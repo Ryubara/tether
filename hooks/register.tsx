@@ -18,7 +18,7 @@ import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type Watch
 import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems } from '../src/checkpoint/handoff'
-import { askText, continueText, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
+import { askText, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 
 // ---- FLEET ----
 // fleet: see the session's agents and what they cost, and refuse waking a big agent on a cold cache.
@@ -351,6 +351,11 @@ const registerFleet: Register = (on, options) => {
           <Text>{'   '}</Text>
           <Text color={wcfg.enabled ? 'green' : undefined} dimColor={!wcfg.enabled}>{`${wcfg.enabled ? (cfg.emoji ? '✅' : '✓') : cfg.emoji ? '❌' : '✗'} Watch`}</Text>
         </Text>
+        {cpLine !== '' && (
+          <Text dimColor wrap="truncate-end">
+            {cpLine}
+          </Text>
+        )}
         <Text bold wrap="truncate-end">
           {cfg.enabled ? head : 'Fleet is off (fleet.enabled is false in the config).'}
         </Text>
@@ -792,6 +797,8 @@ let cpState: CycleState = initialCycle()
 let cpTimers: Array<{ cancel: () => void }> = []
 /** One tick at a time: a tick awaits the prompt and the clear, and the next must not start meanwhile. */
 let cpTicking = false
+/** The line the pane shows for the checkpoint, refreshed each tick. */
+let cpLine = ''
 
 /** Reads the checkpoint section of the config and starts the tick. */
 async function checkpointStart($: any): Promise<void> {
@@ -823,6 +830,11 @@ async function checkpointTick($: any): Promise<void> {
     const observed: Observed = { now, contextTokens, busy, draft, messages, problems }
     const { state, action } = cycleStep(cpState, observed, cpCfg)
     cpState = state
+    const line = describeCycle(cpState, observed, cpCfg)
+    if (line !== cpLine) {
+      cpLine = line
+      $.ui.invalidate('ui.render')
+    }
     await carryOut($, action, problems)
   } finally {
     cpTicking = false

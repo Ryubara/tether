@@ -72,6 +72,32 @@ export function step(state: CycleState, o: Observed, cfg: CheckpointConfig): { s
   return { state: initialCycle(), action: 'give-up' }
 }
 
+/** M:SS, for the countdown in the pane. */
+export function clock(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+/**
+ * One line for the pane: what the checkpoint is doing now, and when it acts next. The countdown is the quiet
+ * window still to wait; it restarts whenever you type, a turn runs or new information arrives.
+ */
+export function describeCycle(state: CycleState, o: Observed, cfg: CheckpointConfig): string {
+  if (!cfg.enabled) return 'checkpoint: off'
+  if (state.phase === 'idle') {
+    if (o.contextTokens < cfg.contextTokens) return `checkpoint: due at ${Math.round(cfg.contextTokens / 1000)}k (now ${Math.round(o.contextTokens / 1000)}k)`
+    if (o.busy) return 'checkpoint due: waiting for the turn to end'
+    if (o.draft !== '') return 'checkpoint due: waiting for your draft to be sent or cleared'
+    return 'checkpoint due: asking for the handoff now'
+  }
+  if (state.phase === 'clearing') return 'checkpoint: clearing now'
+  if (o.busy) return 'checkpoint: handoff requested, waiting for the turn to end'
+  if (o.draft !== '') return 'checkpoint: handoff requested, waiting for your draft to be sent or cleared'
+  const left = state.quietSince + cfg.quietSeconds * 1000 - o.now
+  const what = state.dirty ? 'updating the handoff' : o.problems && o.problems.length ? 'repairing the handoff' : 'clearing'
+  return `checkpoint: ${what} in ${clock(left)} (quiet)`
+}
+
 /** The prompt that asks the model to write the handoff, or to update it after new messages. */
 export function askText(cfg: CheckpointConfig, update: boolean): string {
   const what = update ? `Update ${cfg.handoffFile} with what changed since you last wrote it.` : `Write ${cfg.handoffFile} now.`

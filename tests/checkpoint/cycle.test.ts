@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../../src/checkpoint/config'
 import { handoffProblems } from '../../src/checkpoint/handoff'
-import { askText, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
+import { askText, clock, describeCycle, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
 
 const cfg: CheckpointConfig = { ...CHECKPOINT_DEFAULTS, enabled: true, contextTokens: 1000, quietSeconds: 10, maxRepairs: 2 }
 const GOOD = '## Where to look\nx\n## Summary\nx\n## Next steps\nx\n## Open questions\nx\n'
@@ -138,4 +138,15 @@ test('mergeCheckpoint keeps defaults and takes only well-typed fields', () => {
   expect(mergeCheckpoint({ quietSeconds: 30, enabled: false, contextTokens: 'big' }).contextTokens).toBe(200000)
   expect(mergeCheckpoint({ quietSeconds: 30, enabled: false }).quietSeconds).toBe(30)
   expect(mergeCheckpoint({ sections: [] }).sections.length).toBe(4)
+})
+
+test('the pane line counts down the quiet window, and says what waits', () => {
+  expect(clock(8000)).toBe('0:08')
+  expect(clock(65000)).toBe('1:05')
+  const asked = step(initialCycle(), obs(0), cfg).state
+  expect(describeCycle(asked, obs(3000), cfg)).toBe('checkpoint: clearing in 0:07 (quiet)')
+  expect(describeCycle(asked, obs(3000, { draft: 'half typed' }), cfg)).toMatch(/your draft/)
+  expect(describeCycle(asked, obs(3000, { busy: true }), cfg)).toMatch(/turn to end/)
+  expect(describeCycle(initialCycle(), obs(0, { contextTokens: 500 }), cfg)).toMatch(/due at/)
+  expect(describeCycle(initialCycle(), obs(0, { contextTokens: 5000 }), { ...cfg, enabled: false })).toBe('checkpoint: off')
 })
