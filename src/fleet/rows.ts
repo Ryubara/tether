@@ -33,6 +33,20 @@ export function tokens(n: number | undefined): string {
 /** The agents that are still alive come first, then the ended ones, newest activity first within each. */
 const ENDED = new Set(['completed', 'failed', 'killed'])
 
+/** The flag for a big context that is waiting (see `FleetConfig.bigWaitTokens`). */
+export const BIG_WAIT = 'BIG-WAIT'
+
+/** Whether an agent's note says it is waiting: `bigWaitNote` matched case-insensitively (empty: any note); a pattern that is not a regular expression matches nothing. */
+export function waitNoteMatches(note: string | undefined, pattern: string): boolean {
+  if (!note) return false
+  if (pattern === '') return true
+  try {
+    return new RegExp(pattern, 'i').test(note)
+  } catch {
+    return false
+  }
+}
+
 /** Builds one row per agent, with flags for what needs a decision. */
 export function buildRows(
   agents: AgentLike[],
@@ -51,8 +65,9 @@ export function buildRows(
     // the price of waking an agent whose cache expired: its whole context written to the cache again
     if (live && ctx !== undefined && ctx >= cfg.retireContextTokens) flags.push(`≥${tokens(cfg.retireContextTokens)} retire`)
     if (live && left !== undefined && left <= 0 && ctx !== undefined && ctx >= cfg.bigContextTokens) flags.push(`wake≈${tokens(ctx)}`)
-    if (entry && entry.coldWritten > 0) flags.push('WASTED ' + tokens(entry.coldWritten))
     const note = notes[a.id] ?? (a.name ? notes[a.name] : undefined) ?? (a.description ? notes[a.description] : undefined)
+    if (live && cfg.bigWaitTokens > 0 && ctx !== undefined && ctx >= cfg.bigWaitTokens && waitNoteMatches(note, cfg.bigWaitNote)) flags.push(BIG_WAIT)
+    if (entry && entry.coldWritten > 0) flags.push('WASTED ' + tokens(entry.coldWritten))
     return {
       id: a.id,
       label: a.name ?? a.description ?? a.type ?? a.id,
@@ -83,6 +98,8 @@ export function summary(rows: Row[], mainContext: number | undefined, limits: Ra
   const retire = rows.filter(r => r.flags.some(f => f.endsWith(' retire'))).length
   if (cold) parts.push(`${cold} cold`)
   if (retire) parts.push(`${retire} to retire`)
+  const bigWait = rows.filter(r => r.flags.includes(BIG_WAIT)).length
+  if (bigWait) parts.push(`${bigWait} big-wait`)
   if (cfg.showSession && mainContext !== undefined) parts.push(`main ctx ${tokens(mainContext)}`)
   const worst = [...limits].sort((a, b) => b.percentUsed - a.percentUsed)[0]
   if (cfg.showSession && worst) parts.push(`${worst.kind.replace('_', ' ')} ${worst.percentUsed}%` + (worst.percentUsed >= cfg.usageWarnPercent ? ' !' : ''))

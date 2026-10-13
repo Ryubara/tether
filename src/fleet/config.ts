@@ -8,6 +8,13 @@ export type FleetConfig = {
   bigContextTokens: number
   /** Context size at which an agent is flagged for retirement. */
   retireContextTokens: number
+  /**
+   * From this context size (0: never) a live agent whose annotation note matches `bigWaitNote` is flagged
+   * BIG-WAIT: it holds a big context while waiting on something, so retire it and start a small successor.
+   */
+  bigWaitTokens: number
+  /** A regular expression, matched case-insensitively against the agent's annotation note; empty: any note (an agent with no note never matches). */
+  bigWaitNote: string
   /** Refuse SendMessage to a big agent whose cache has expired, unless the message starts with `overrideToken`. */
   coldGuard: boolean
   /** The text a message starts with to pass the cold-cache guard on purpose. */
@@ -51,6 +58,8 @@ export const DEFAULTS: FleetConfig = {
   cacheTtlMinutes: 60,
   bigContextTokens: 60_000,
   retireContextTokens: 300_000,
+  bigWaitTokens: 0,
+  bigWaitNote: '',
   coldGuard: true,
   overrideToken: '[cache-ok]',
   enabled: true,
@@ -70,12 +79,13 @@ export function mergeConfig(raw: unknown): FleetConfig {
   const out: FleetConfig = { ...DEFAULTS }
   if (raw === null || typeof raw !== 'object') return out
   const r = raw as Record<string, unknown>
-  for (const key of ['cacheTtlMinutes', 'bigContextTokens', 'retireContextTokens', 'usageWarnPercent', 'refreshSeconds', 'cacheWarnMinutes'] as const) {
+  for (const key of ['cacheTtlMinutes', 'bigContextTokens', 'retireContextTokens', 'bigWaitTokens', 'usageWarnPercent', 'refreshSeconds', 'cacheWarnMinutes'] as const) {
     if (typeof r[key] === 'number' && Number.isFinite(r[key]) && (r[key] as number) > 0) out[key] = r[key] as number
   }
   if (typeof r.coldGuard === 'boolean') out.coldGuard = r.coldGuard
   if (typeof r.enabled === 'boolean') out.enabled = r.enabled
   if (typeof r.showSession === 'boolean') out.showSession = r.showSession
+  if (typeof r.bigWaitNote === 'string') out.bigWaitNote = r.bigWaitNote.trim()
   if (typeof r.watchState === 'string') out.watchState = r.watchState.trim()
   if (typeof r.emoji === 'boolean') out.emoji = r.emoji
   if (typeof r.columnTint === 'boolean' || (typeof r.columnTint === 'string' && r.columnTint.trim() !== '')) {
