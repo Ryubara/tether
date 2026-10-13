@@ -1,0 +1,12 @@
+{
+  "name": "tether",
+  "owner": { "name": "Ryubara", "url": "https://github.com/Ryubara" },
+  "description": "Tether: keep a project together across Claude Code sessions",
+  "plugins": [
+    {
+      "name": "tether",
+      "source": "./",
+      "description": "An agents pane, watchers that wake the model only for news, and guards against expensive mistakes"
+    }
+  ]
+}

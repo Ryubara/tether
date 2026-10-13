@@ -1,0 +1,24 @@
+{
+  "fleet": {
+    "cacheTtlMinutes": 60,
+    "bigContextTokens": 60000,
+    "retireContextTokens": 300000,
+    "coldGuard": true,
+    "columnTint": true,
+    "refreshSeconds": 15
+  },
+  "watch": {
+    "tickSeconds": 1,
+    "boxRows": 6,
+    "pollers": [
+      {
+        "id": "agents",
+        "kind": "agents",
+        "title": "Subagents",
+        "everySeconds": 60,
+        "silentMinutes": 45,
+        "contextTokens": 300000
+      }
+    ]
+  }
+}
