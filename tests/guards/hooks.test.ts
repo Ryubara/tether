@@ -89,6 +89,8 @@ test('a PR problem is told, blocks the Stop hook until owned, and an owner ends 
 
   const done: any = await $.tool.call({ tool: 'mcp__tether__pr_owner', pr: 12, kind: 'assign', who: 'agent-7', note: 'fixing it' } as any)
   expect(done.text ?? JSON.stringify(done)).toContain('#12 assigned to agent-7')
+  // The harness refuses a tool result that is an object: the text goes back as a plain string
+  expect(typeof (done.result ?? done.text)).toBe('string')
   const after: any = await ($ as any).classic.Stop({ stop_hook_active: false })
   expect(after.block).toBeUndefined()
   const report: any = await $.command.run({ command: 'guards' } as any)
