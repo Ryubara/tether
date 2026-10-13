@@ -45,18 +45,22 @@ test('an agent started before fleet loaded gets its context and idle time, a res
   }
   const reads: string[] = []
   const norm = (p: string) => p.replace(/\\/g, '/')
+  // The kit hands the stubs a path in the platform's form (backslashes on Windows, resolved against the cwd on
+  // Linux), so a file is found by the end of its path.
+  const find = (p: string) => Object.keys(files).find(k => norm(p).endsWith(k))
   stub('session.start', () => ({ cwd: 'C:/work' }))
   stub('command.register', () => ({ value: undefined }))
   stub('store.get', () => ({ value: undefined }))
   stub('env.get', ($: any, e: any) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }))
   stub('session.cwd', () => ({ value: 'C:/work' }))
   stub('session.id', () => ({ value: 's1' }))
-  stub('fs.exists', ($: any, e: any) => ({ value: norm(e.path) in files }))
+  stub('fs.exists', ($: any, e: any) => ({ value: find(e.path) !== undefined }))
   stub('fs.list', () => ({ value: [{ name: 's1', kind: 'dir', size: 0 }, { name: 'old.jsonl', kind: 'file', size: 1 }] }))
   stub('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }))
   stub('fs.read', ($: any, e: any) => {
-    reads.push(norm(e.path))
-    return { value: files[norm(e.path)] ?? '' }
+    const key = find(e.path)
+    reads.push(key ?? norm(e.path))
+    return { value: key ? files[key] : '' }
   })
   stub('agent.list', () => ({ value: [{ id: 'a1', status: 'waiting', description: '(resumed)', type: 'general-purpose' }] }))
   stub('ui.status', () => ({ value: undefined }))

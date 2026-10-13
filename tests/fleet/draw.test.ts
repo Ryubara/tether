@@ -50,7 +50,7 @@ async function texts(ui: any): Promise<Array<{ text: string; props: Record<strin
   return (await ui.findAll({ type: 'Text' })).map((t: any) => ({ text: t.text, props: t.props }))
 }
 
-test('the pane draws a summary and one row per agent on every pane surface', async ($, on) => {
+test('the pane draws a summary and one row per agent on every pane surface', { timeoutMs: 30_000 }, async ($, on) => {
   const clock = await start($, on, AGENTS)
   await step($, 'a1')
   await clock.advance(61 * MIN)

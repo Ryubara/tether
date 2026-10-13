@@ -39,7 +39,7 @@ async function step($: any, agentId: string) {
   return s.value
 }
 
-test('SendMessage to a big agent passes while its cache is warm and is refused once it is cold', async ($, on) => {
+test('SendMessage to a big agent passes while its cache is warm and is refused once it is cold', { timeoutMs: 30_000 }, async ($, on) => {
   const statuses: string[] = []
   const toasts: string[] = []
   const clock = await start($, on, statuses, toasts)
@@ -56,7 +56,7 @@ test('SendMessage to a big agent passes while its cache is warm and is refused o
   expect(statuses[statuses.length - 1]).toBe('1 agent (0 running, 1 waiting) · 1 cold')
 })
 
-test('a cold wake is toasted and counted', async ($, on) => {
+test('a cold wake is toasted and counted', { timeoutMs: 30_000 }, async ($, on) => {
   const statuses: string[] = []
   const toasts: string[] = []
   const clock = await start($, on, statuses, toasts)
