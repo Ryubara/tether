@@ -18,6 +18,8 @@ type World = {
   /** The messages of the session. */
   messages: unknown[]
   agents: Array<{ id: string; status: string; description: string; type: string }>
+  /** Transcript files Claude Code wrote (path suffix -> text); `fs.list` shows one session folder `s1`. */
+  transcripts: Record<string, string>
 }
 
 /** What was written to the file whose path ends with `suffix` (the engine spells paths absolutely). */
@@ -26,7 +28,7 @@ function written(w: World, suffix: string): string | undefined {
   return key === undefined ? undefined : w.files[key]
 }
 
-const world = (over: Partial<World> = {}): World => ({ files: {}, exist: new Set(), submits: [], logs: [], prs: [], messages: [], agents: [], ...over })
+const world = (over: Partial<World> = {}): World => ({ files: {}, exist: new Set(), submits: [], logs: [], prs: [], messages: [], agents: [], transcripts: {}, ...over })
 
 /** Starts Tether with `config` as the project file and the fake world's answers. */
 async function start($: any, on: any, config: unknown, w: World) {
@@ -35,8 +37,17 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', () => ({ value: undefined }))
   on('tool.register', () => ({ value: { tool: 'x' } }))
-  on('fs.exists', ($: any, e: any) => ({ value: w.exist.has(e.path.replace(/\\/g, '/')) || e.path.endsWith('tether.json') }))
-  on('fs.read', ($: any, e: any) => ({ value: e.path.endsWith('tether.json') ? JSON.stringify(config) : (w.files[e.path] ?? '') }))
+  const transcript = (p: string) => Object.keys(w.transcripts).find(k => p.replace(/\\/g, '/').endsWith(k))
+  on('fs.exists', ($: any, e: any) => ({ value: w.exist.has(e.path.replace(/\\/g, '/')) || e.path.endsWith('tether.json') || transcript(e.path) !== undefined }))
+  on('fs.list', () => ({ value: [{ name: 's1', kind: 'dir', size: 0 }] }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 1, isLink: false } }))
+  on('env.get', ($: any, e: any) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }))
+  on('session.cwd', () => ({ value: '/work' }))
+  on('fs.read', ($: any, e: any) => {
+    const k = transcript(e.path)
+    if (k !== undefined) return { value: w.transcripts[k] }
+    return { value: e.path.endsWith('tether.json') ? JSON.stringify(config) : (w.files[e.path] ?? '') }
+  })
   on('fs.write', ($: any, e: any) => {
     w.files[e.path.replace(/\\/g, '/')] = e.text
     w.exist.add(e.path.replace(/\\/g, '/'))
@@ -155,6 +166,21 @@ test('a stopped big agent blocks Stop until it is decided', { timeoutMs: 30_000 
   expect(stop.block).toContain('a1')
   await $.tool.call({ tool: 'mcp__tether__agent_decision', id: 'a1', decision: 'retired', note: 'successor later' } as any)
   expect((((await ($ as any).classic.Stop({ stop_hook_active: false })) as any).block)).toBeUndefined()
+})
+
+test('a big agent that stepped before Tether loaded is still caught, from its transcript', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: [{ id: 'a1', status: 'completed', description: 'builder', type: 'general-purpose' }] })
+  const clock = await start($, on, { watch: { pollers: [{ id: 'agents', kind: 'agents', everySeconds: 60 }] } }, w)
+  // The agent made its last request 50 minutes ago, before Tether loaded, so Tether never saw it step: only Claude
+  // Code's transcript knows (written after the start, as the agent's own run would have)
+  const at = new Date((await (clock as any).now()) - 50 * MIN).toISOString()
+  const line = JSON.stringify({ type: 'assistant', timestamp: at, message: { role: 'assistant', usage: { input_tokens: 2, cache_read_input_tokens: 90_000 } } })
+  w.transcripts['/s1/subagents/agent-a1.jsonl'] = line
+  await clock.advance(6 * MIN)
+  const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
+  expect(stop.block).toContain('CACHE GUARD')
+  expect(stop.block).toContain('a1')
+  expect(stop.block).toContain('context 90k')
 })
 
 test('housekeeping hides Tether from git, makes the handoff, and holds writes of it to the template', { timeoutMs: 30_000 }, async ($, on) => {

@@ -491,15 +491,21 @@ async function runCommand($: any, p: CommandPoller): Promise<{ findings?: Findin
 /** The session's subagents with what their requests showed, for the agents poller. */
 async function agentsSeen($: any, now: number): Promise<AgentSeen[]> {
   const list = ((await $.agent.list()) ?? []) as Array<{ id: string; status: string; name?: string; description?: string; type?: string }>
+  // An agent that stepped before this session of Tether (a reload, a restart) has no entry in `steps`: read its last
+  // request from Claude Code's transcript, the way the fleet pane does, so the agent guard still knows its context.
+  agents = list as AgentLike[]
+  await noteProjectDir($)
+  await backfill($)
   return list.map(a => {
     if (!firstSeen.has(a.id)) firstSeen.set(a.id, now)
     const s = steps.get(a.id)
+    const l = s ? undefined : ledger.get(a.id)
     return {
       id: a.id,
       status: a.status,
       label: a.name ?? a.description ?? a.type ?? a.id,
-      lastStepAt: s?.at ?? firstSeen.get(a.id)!,
-      ...(s ? { contextTokens: s.context } : {}),
+      lastStepAt: s?.at ?? l?.lastStepAt ?? firstSeen.get(a.id)!,
+      ...(s ? { contextTokens: s.context } : l ? { contextTokens: l.contextTokens } : {}),
     }
   })
 }
