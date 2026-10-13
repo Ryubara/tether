@@ -49,6 +49,10 @@ export type AgentsPoller = {
   contextTokens: number
   /** Also count agents `waiting` on their own background work as silent (off: that wait is normal). */
   includeWaiting: boolean
+  /** A stopped agent with a big context is a finding (and blocks the Stop hook) this long after its last request, until decided. */
+  actAfterMinutes: number
+  /** A stopped agent quiet longer than this is forgotten. */
+  forgetAgentMinutes: number
   dedupe: boolean
   forgetMinutes: number
   wake: boolean
@@ -56,7 +60,40 @@ export type AgentsPoller = {
   boxRows?: number
 }
 
-export type Poller = CommandPoller | AgentsPoller
+/**
+ * A poller over the project's open pull requests (the PR guard). A problem with no owner is a finding; the
+ * model records an owner or a waiver with the tether pr_owner tool. By default it reads GitHub with `gh`;
+ * a `command` replaces that read with the project's own (its JSON is `{ "stuck": [...] }`).
+ */
+export type PrsPoller = {
+  kind: 'prs'
+  id: string
+  everySeconds: number
+  /** The project's own health command, as argv; absent, the built-in `gh pr list` read. */
+  command?: string[]
+  /** Working directory of `gh`, `git` and the command; absent, the session's. */
+  cwd?: string
+  timeoutMs: number
+  /** Built-in read: CI running this long counts as stuck. */
+  stuckMinutes: number
+  /** Built-in read: a PR without auto-merge is a problem. */
+  requireAutoMerge: boolean
+  /** Built-in read: draft PRs are not checked. */
+  ignoreDrafts: boolean
+  /** A folder holding one worktree per PR branch (`<worktrees>/<branch>`); idle ones ahead of origin are `unpushed`. */
+  worktrees?: string
+  /** A file whose presence in a worktree marks it busy (an agent is working there), so it is not `unpushed`. */
+  busyMarker?: string
+  /** How long an `assign` lasts, in hours. */
+  assignHours: number
+  dedupe: boolean
+  forgetMinutes: number
+  wake: boolean
+  title: string
+  boxRows?: number
+}
+
+export type Poller = CommandPoller | AgentsPoller | PrsPoller
 
 /** Everything watch can be told. */
 export type WatchConfig = {
@@ -147,6 +184,30 @@ function poller(raw: unknown, i: number, problems: string[]): Poller | undefined
       silentMinutes: num(r.silentMinutes, 20),
       contextTokens: num(r.contextTokens, 300_000),
       includeWaiting: r.includeWaiting === true,
+      actAfterMinutes: num(r.actAfterMinutes, 45),
+      forgetAgentMinutes: num(r.forgetAgentMinutes, 180),
+    }
+  }
+  if (r.kind === 'prs') {
+    const command = r.command
+    if (command !== undefined && (!Array.isArray(command) || command.length === 0 || !command.every(s => typeof s === 'string'))) {
+      problems.push(`${id}: command must be a non-empty list of strings`)
+      return undefined
+    }
+    const text = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined)
+    return {
+      kind: 'prs',
+      ...common,
+      everySeconds: num(r.everySeconds, 300),
+      ...(command ? { command: command as string[] } : {}),
+      ...(text(r.cwd) ? { cwd: text(r.cwd) } : {}),
+      timeoutMs: num(r.timeoutMs, 240_000),
+      stuckMinutes: num(r.stuckMinutes, 90),
+      requireAutoMerge: r.requireAutoMerge === true,
+      ignoreDrafts: r.ignoreDrafts !== false,
+      ...(text(r.worktrees) ? { worktrees: text(r.worktrees) } : {}),
+      ...(text(r.busyMarker) ? { busyMarker: text(r.busyMarker) } : {}),
+      assignHours: num(r.assignHours, 4),
     }
   }
   if (r.kind !== undefined && r.kind !== 'command') {

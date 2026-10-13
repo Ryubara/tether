@@ -1,6 +1,8 @@
 // Turning a poller's output into findings, and telling each finding once.
 
 import type { AgentsPoller, CommandPoller } from './config'
+import { undecided, type AgentRules } from '../guards/agents'
+import type { GuardStore } from '../guards/store'
 
 /** One thing a poller reports. `key` is what dedupe remembers (e.g. PR + cause + head sha). */
 export type Finding = { key: string; text: string }
@@ -69,8 +71,14 @@ export type AgentSeen = {
   contextTokens?: number
 }
 
-/** The agents poller's findings: running agents silent too long, agents past the context size. */
-export function agentFindings(p: AgentsPoller, agents: AgentSeen[], now: number): Finding[] {
+/** What the agent guard needs besides the poller: the decisions made, and the thresholds fleet shares. */
+export type AgentGuard = { store: GuardStore; cacheMinutes: number; smallTokens: number }
+
+/**
+ * The agents poller's findings: running agents silent too long, agents past the context size and, with a
+ * `guard`, stopped big agents nobody has decided about (retired or done) as their cache runs out.
+ */
+export function agentFindings(p: AgentsPoller, agents: AgentSeen[], now: number, guard?: AgentGuard): Finding[] {
   const out: Finding[] = []
   for (const a of agents) {
     const live = a.status === 'running' || (p.includeWaiting && a.status === 'waiting')
@@ -82,6 +90,10 @@ export function agentFindings(p: AgentsPoller, agents: AgentSeen[], now: number)
     if (a.contextTokens !== undefined && a.contextTokens >= p.contextTokens && a.status !== 'completed' && a.status !== 'failed' && a.status !== 'killed') {
       out.push({ key: `${a.id}|context`, text: `${a.label} (${a.id}) context ${Math.round(a.contextTokens / 1000)}k, past ${Math.round(p.contextTokens / 1000)}k` })
     }
+  }
+  if (guard) {
+    const rules: AgentRules = { cacheMinutes: guard.cacheMinutes, smallTokens: guard.smallTokens, actAfterMinutes: p.actAfterMinutes, forgetMinutes: p.forgetAgentMinutes }
+    for (const u of undecided(agents, guard.store, rules, now)) out.push({ key: `${u.id}|undecided`, text: u.text })
   }
   return out
 }

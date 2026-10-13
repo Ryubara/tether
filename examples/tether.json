@@ -13,7 +13,12 @@
     "quietSeconds": 90,
     "handoffFile": "HANDOFF.md",
     "maxChars": 9500,
-    "sections": ["## Where to look", "## Summary", "## Next steps", "## Open questions"],
+    "sections": [
+      "## Where to look",
+      "## Summary",
+      "## Next steps",
+      "## Open questions"
+    ],
     "maxRepairs": 3
   },
   "watch": {
@@ -27,7 +32,32 @@
         "everySeconds": 60,
         "silentMinutes": 45,
         "contextTokens": 300000
+      },
+      {
+        "id": "prs",
+        "kind": "prs",
+        "title": "Open pull requests",
+        "everySeconds": 300,
+        "stuckMinutes": 90,
+        "requireAutoMerge": false,
+        "ignoreDrafts": true,
+        "assignHours": 4
       }
     ]
+  },
+  "housekeeping": {
+    "enabled": true,
+    "folder": ".tether",
+    "exclude": [],
+    "createHandoff": true,
+    "enforceHandoff": true
+  },
+  "conversations": {
+    "enabled": true,
+    "minSeconds": 30
+  },
+  "stop": {
+    "enabled": true,
+    "maxBlocks": 3
   }
 }

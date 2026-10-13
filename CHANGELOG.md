@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.0.0-alpha.10
+
+- **PR guard.** A poller of `kind: "prs"` reads the open pull requests (with `gh`, or with a project's own
+  health command whose JSON is `{ "stuck": [...] }`) and tells each problem nobody owns: `conflict`,
+  `checks-failed`, `ci-stuck`, `auto-merge-off` (opt in), `unpushed` (a worktree ahead of origin, via
+  `worktrees`), and whatever causes the health command reports. A problem is keyed PR + cause + head commit.
+- **Agent guard.** The agents poller also tells stopped agents with a big context that nobody has decided about
+  (retired or done) as their prompt cache runs out. Thresholds come from `fleet`, so there is one source.
+- **One store, two tools.** The model records an owner or a waiver with `mcp__tether__pr_owner` and a decision
+  with `mcp__tether__agent_decision`; both live in one value in `$.store`. `/guards` prints what is open.
+- **Stop hook.** The end of a turn is blocked while a PR problem or a stopped big agent has no owner or decision,
+  at most `stop.maxBlocks` (3) times in a row for the same reason, so a model that cannot fix it never loops.
+- **Housekeeping.** At session start Tether adds its folder (`.tether/`), the handoff and a project-relative
+  config to `.git/info/exclude` (no tracked file is edited), and makes `HANDOFF.md` from the template when it is
+  missing. A Write of the handoff that breaks its template (headings, size) is refused; an Edit that leaves it
+  broken is told to the model. Section `housekeeping`: `enabled`, `folder`, `exclude`, `createHandoff`,
+  `enforceHandoff`.
+- **Conversation logs.** Each session is rendered to `.tether/conversations/<date>-<time>-<id>.md` after every
+  turn (at most every `conversations.minSeconds`), before a checkpoint clear and when the session ends. The log
+  is never loaded into a session.
+- `scripts/check-version.sh` and a CI workflow check that `plugin.json` and the changelog agree, then validate
+  and test the plugin.
+
+## 1.0.0-alpha.9
+
+- The pane shows one checkpoint line above the agent table: what the checkpoint waits for and a countdown to its
+  next action.
+
+## 1.0.0-alpha.8
+
+- Every message the model writes in reply to a cycle prompt is ignored until the person writes again.
+
+## 1.0.0-alpha.7
+
+- The checkpoint recognises its own prompts inside the transcript's plugin frame.
+
+## 1.0.0-alpha.6
+
+- New information is every message of the person's or the main agent's, except the cycle's own prompts and
+  their replies.
+
+## 1.0.0-alpha.5
+
+- The checkpoint waits 5 quiet seconds (checked every 2 s) and requeues only on the person's new messages.
+
 ## 1.0.0-alpha.4
 
 - The main settings are plugin options: `/plugin configure tether@tether` sets checkpoint on or off, the checkpoint

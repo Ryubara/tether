@@ -24,8 +24,9 @@ async function start($: any, on: any, config: unknown, world: World) {
   mock.store(on)
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', () => ({ value: undefined }))
+  on('tool.register', () => ({ value: { tool: 'x' } }))
   on('fs.exists', () => ({ value: true }))
-  on('fs.read', () => ({ value: JSON.stringify({ watch: config }) }))
+  on('fs.read', () => ({ value: JSON.stringify({ watch: config, housekeeping: { enabled: false }, conversations: { enabled: false } }) }))
   on('process.run', () => {
     const r = world.runs.length > 1 ? world.runs.shift()! : world.runs[0]!
     return { value: { stderr: '', isStdoutTruncated: false, isStderrTruncated: false, ...r } }
