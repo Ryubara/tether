@@ -122,6 +122,8 @@ export type WatchConfig = {
   tickSeconds: number
   /** Log lines each poller's box shows unless it sets its own `boxRows`. */
   boxRows: number
+  /** Open the pane, without focus, when a session starts (new, resumed or cleared). */
+  openOnStart: boolean
   /** The pane size asked: `rows` inline above the prompt, `columns` docked beside a fullscreen transcript. */
   pane: { rows?: number; columns?: number }
   /** A file watch writes the boxes' data to, for fleet (its `watchState`) to draw under its table; empty: none. */
@@ -137,6 +139,7 @@ export const DEFAULTS: WatchConfig = {
   storeName: 'default',
   tickSeconds: 1,
   boxRows: 6,
+  openOnStart: false,
   pane: {},
   stateFile: '',
 }
@@ -271,6 +274,7 @@ export function parseConfig(raw: unknown, agentContextTokens = DEFAULT_AGENT_CON
   if (Number.isInteger(r.boxRows) && (r.boxRows as number) >= 1 && (r.boxRows as number) <= 50) config.boxRows = r.boxRows as number
   if (typeof r.stateFile === 'string') config.stateFile = r.stateFile.trim()
   if (typeof r.enabled === 'boolean') config.enabled = r.enabled
+  if (typeof r.openOnStart === 'boolean') config.openOnStart = r.openOnStart
   const pane = r.pane as Record<string, unknown> | undefined
   if (pane && typeof pane === 'object') {
     for (const k of ['rows', 'columns'] as const) if (Number.isInteger(pane[k]) && (pane[k] as number) > 0) config.pane[k] = pane[k] as number

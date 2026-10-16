@@ -180,6 +180,16 @@ async function runChecked($: any, argv: string[], init: Record<string, unknown>)
   return $.process.run(argv, init)
 }
 
+/**
+ * Opens a pane as a session starts (`openOnStart`): beside the panes already open, without taking focus (no
+ * `focus`), and without holding the start up. A pane that cannot be placed (a headless session) is left unopened.
+ */
+function openAtStart($: any, pane: Record<string, unknown>): void {
+  try {
+    void Promise.resolve($.ui.open({ ...pane, closeOnEscape: true })).catch(() => {})
+  } catch {}
+}
+
 /** The fleet settings while halted: off, no guard. */
 const FLEET_OFF: FleetConfig = { ...DEFAULTS, enabled: false, coldGuard: false }
 
@@ -345,6 +355,7 @@ const fleetStart = async ($: any, e: any, next: any): Promise<any> => {
   try {
     await $.command.register({ ...registration(FLEET), immediate: true })
   } catch {}
+  if (cfg.openOnStart && cfg.enabled && !halted) openAtStart($, { id: PANE, title: 'Fleet', ...cfg.pane })
   return next(e)
 }
 
@@ -886,6 +897,7 @@ const watchStart = async ($: any, e: any, next: any): Promise<any> => {
     await $.command.register({ ...registration(WATCH), immediate: true })
   } catch {}
   await status($)
+  if (wcfg.openOnStart && wcfg.enabled && !halted) openAtStart($, { id: WATCH_PANE, title: 'Watch', ...wcfg.pane })
   return next(e)
 }
 

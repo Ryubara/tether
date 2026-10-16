@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0-alpha.23
+
+- Added: `fleet.openOnStart` and `watch.openOnStart` (options `fleetOpenOnStart` and `watchOpenOnStart`, both off by
+  default) open the Fleet and Watch panes when a session starts (new, resumed or cleared), with the same title and
+  `pane` size as the commands, beside the panes already open. They do not take the focus and do not hold the start
+  up; where no pane can be placed (a headless session) nothing opens. Nothing opens while that part is off or the
+  config has failed closed.
+
 ## 1.0.0-alpha.22
 
 - Added: the `TETHER_CONFIG` environment variable names the config file (an absolute path) and wins over the

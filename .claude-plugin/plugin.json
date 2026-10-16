@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.22",
+  "version": "1.0.0-alpha.23",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -161,6 +161,12 @@
       "description": "A state file watch writes; when set the pane draws watch boxes under the table. Empty: none.",
       "default": ""
     },
+    "fleetOpenOnStart": {
+      "type": "boolean",
+      "title": "Open the Fleet pane at start",
+      "description": "Open the Fleet pane, without taking focus, when a session starts (new, resumed or cleared).",
+      "default": false
+    },
     "fleetPaneRows": {
       "type": "number",
       "title": "Fleet pane rows",
@@ -220,6 +226,12 @@
       "title": "Watch state file",
       "description": "A file watch writes the boxes data to, for fleet to draw. Empty: none.",
       "default": ""
+    },
+    "watchOpenOnStart": {
+      "type": "boolean",
+      "title": "Open the Watch pane at start",
+      "description": "Open the Watch pane, without taking focus, when a session starts (new, resumed or cleared).",
+      "default": false
     },
     "watchPaneRows": {
       "type": "number",
