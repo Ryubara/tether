@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0-alpha.24
+
+- Fixed: after a `/clear` the checkpoint no longer asks for the handoff at once. Any clear, the checkpoint's or the
+  person's, starts the cycle over and forgets the old session's context size, which survived the clear and made
+  the new session look due before its first request.
+- Fixed: the checkpoint's own clear waits up to 30 seconds for the new session to start before it counts the clear
+  as not done, so a new session that starts after the command returns still gets `Continue from <handoff>.`
+- Added: `checkpoint.retryMinutes` (option `checkpointRetryMinutes`, default 15). After a give-up, or a clear that
+  did not happen, the checkpoint waits this long before asking for the handoff again instead of asking at once.
+
 ## 1.0.0-alpha.23
 
 - Added: `fleet.openOnStart` and `watch.openOnStart` (options `fleetOpenOnStart` and `watchOpenOnStart`, both off by

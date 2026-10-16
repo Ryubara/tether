@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../../src/checkpoint/handoff'
-import { askText, clock, describeCycle, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
+import { askText, backedOff, clock, describeCycle, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
 
 const cfg: CheckpointConfig = { ...CHECKPOINT_DEFAULTS, enabled: true, contextTokens: 1000, quietSeconds: 10, maxRepairs: 2 }
 const GOOD = '## Where to look\nx\n## Summary\nx\n## Next steps\nx\n## Open questions\nx\n'
@@ -71,6 +71,16 @@ test('a handoff that never passes stops after its repairs and gives up instead o
   const last = step(s, obs(t, failing), cfg)
   expect(last.action).toBe('give-up')
   expect(last.state.phase).toBe('idle')
+})
+
+test('after a give-up the still-long session is asked again only after retryMinutes', () => {
+  const c = { ...cfg, retryMinutes: 10 }
+  const given = backedOff(0, c)
+  expect(step(given, obs(9 * 60_000), c).action).toBe('none')
+  expect(describeCycle(given, obs(9 * 60_000), c)).toBe('checkpoint due: asking again in 1:00')
+  const again = step(given, obs(10 * 60_000), c)
+  expect(again.action).toBe('ask')
+  expect(again.state.retryAt).toBe(0)
 })
 
 test('a missing handoff file is never cleared over', () => {
