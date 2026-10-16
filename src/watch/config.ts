@@ -1,5 +1,7 @@
 // watch's settings: the pollers a project declares, and how its JSON file is read.
 
+import { ID_LIKE } from '../options/plain'
+
 /** A poller that runs a command and reads findings from its output. */
 export type CommandPoller = {
   kind: 'command'
@@ -36,6 +38,11 @@ export type CommandPoller = {
   title: string
   /** Log lines its box shows (the box is this plus the title row tall); absent, the config's `boxRows`. */
   boxRows?: number
+  /**
+   * Under `plainOutput`, the codes a finding may carry: the command then prints JSON lines
+   * `{ "key": "<id>", "code": "<one of these>" }`, and anything else is dropped (counted, not shown).
+   */
+  codes: string[]
 }
 
 /** A poller over the session's own subagents: running ones gone silent, or past a context size. */
@@ -225,6 +232,11 @@ function poller(raw: unknown, i: number, problems: string[], agentContextTokens:
     problems.push(`${id}: command must be a non-empty list of strings`)
     return undefined
   }
+  const pollerCodes = r.codes === undefined ? [] : r.codes
+  if (!Array.isArray(pollerCodes) || !pollerCodes.every(c => typeof c === 'string' && ID_LIKE.test(c))) {
+    problems.push(`${id}: codes must be a list of ids (letters, digits, . _ : -)`)
+    return undefined
+  }
   const match = regex(r.match, `${id}.match`, problems)
   const key = regex(r.key, `${id}.key`, problems)
   return {
@@ -239,6 +251,7 @@ function poller(raw: unknown, i: number, problems: string[], agentContextTokens:
     ...(key ? { key } : {}),
     okExitCodes: codes(r.okExitCodes, [0]),
     quietExitCodes: codes(r.quietExitCodes, []),
+    codes: pollerCodes as string[],
   }
 }
 

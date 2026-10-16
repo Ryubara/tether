@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.0-alpha.22
+
+- Added: the `TETHER_CONFIG` environment variable names the config file (an absolute path) and wins over the
+  `configPath` option and `.claude/tether.json`. The file is picked once per load of the plugin.
+- Added: failing closed. A file named by `TETHER_CONFIG`, or one that says `"locked": true`, that is missing,
+  unreadable, not JSON or not valid (an unknown top-level key, a section that is not an object, a field of the wrong
+  type, a bad poller, a relative `TETHER_CONFIG`) turns every part off: no pollers, no guard acting, no Stop block,
+  no checkpoint, no handoff added, no housekeeping, no logs or store writes. Tether says so once, with a fixed text, in
+  the status line and a toast, and every command answers with it. It never falls back to the options or the
+  project file. A top-level policy key with the wrong type fails closed in any file.
+- Added: `"locked": true`. The file's values are final: the plugin options are not read (defaults, then the file),
+  no other file is read, and `/tether-watch reload` reads only the same file again. Every option can be set from
+  the file.
+- Added: `"network": false`. No `prs` poller (so no PR health command), and a command poller or `fleet.annotate`
+  whose program is `gh`, `curl`, `wget`, `ssh`, `scp`, or `git` with a network subcommand is refused, told by the
+  code `refused:network`, never by the command.
+- Added: `allowedCommands`, a list of argv prefixes; when set, only commands that start with one run (Tether's own
+  `git` and `gh` calls included), told by `refused:not-allowed` otherwise.
+- Added: `"plainOutput": true`. Every text Tether submits, returns, shows or writes is a fixed template filled with
+  ids, numbers and codes only: agents by id, PR problems by number and cause code, failures by code; no descriptions,
+  branch or check names, details, stderr, stdout, error texts or notes. Command pollers then read only
+  `{ "key", "code" }` JSON lines with a code from their new `codes` list, and count the rest as dropped.
+  `/tether-fleet text` and the handoff added at session start are off under it. A table-driven test plants
+  synthetic text in every input and checks that none of it reaches any sink.
+- Changed: `/tether-watch reload` re-reads the config for every part (fleet, checkpoint, guards, housekeeping),
+  not only watch.
+
 ## 1.0.0-alpha.21
 
 - Changed: the subagent max context is one setting. The option `fleetRetireContextTokens` (config key

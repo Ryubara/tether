@@ -5,6 +5,7 @@ import type { Decision } from '../guards/store'
 import type { FleetConfig } from './config'
 import { cacheMinutesLeft, type Ledger } from './ledger'
 import { tokens, type AgentLike } from './rows'
+import { plainId } from '../options/plain'
 
 /** The SendMessage fields the guard reads. */
 export type SendMessageInput = { to?: unknown; message?: unknown }
@@ -30,7 +31,7 @@ export function resolveAgent(to: string, agents: AgentLike[], names: Map<string,
  * never woken, whatever its cache age (kept-warm is not a decision of that kind: it records a ping). An undecided agent is refused only when it is big and its cache has
  * really expired. A message to an agent fleet has no request for (spawned before fleet loaded) and no decision
  * passes: there is no evidence its cache is cold. A message that starts with the override token passes on
- * purpose.
+ * purpose. With `plain` (plainOutput) the refusal names the agent by its id and leaves out the decision's note.
  */
 export function coldGuard(
   input: SendMessageInput,
@@ -40,19 +41,21 @@ export function coldGuard(
   cfg: FleetConfig,
   names: Map<string, string> = new Map(),
   decisions: Record<string, Decision> = {},
+  plain = false,
 ): string | undefined {
   if (!cfg.enabled || !cfg.coldGuard || typeof input.to !== 'string') return undefined
   const message = typeof input.message === 'string' ? input.message : ''
   if (message.trimStart().startsWith(cfg.overrideToken)) return undefined
   const agent = resolveAgent(input.to, agents, names)
   const id = agent?.id ?? input.to
-  const who = agent?.name ?? (input.to !== agent?.id ? input.to : agent?.description ?? input.to)
+  // Under plainOutput an agent is named by its id only, and a decision's note is not repeated
+  const who = plain ? plainId(id) : agent?.name ?? (input.to !== agent?.id ? input.to : agent?.description ?? input.to)
   const found = Object.hasOwn(decisions, id) ? decisions[id] : undefined
   // Kept-warm only records a ping: the agent stays wakeable
   const decided = found?.decision === 'kept-warm' ? undefined : found
   if (decided) {
     return (
-      `fleet: not sent. Agent ${who} is decided ${decided.decision}${decided.note ? ` (${decided.note})` : ''}: a decided agent is never woken, ` +
+      `fleet: not sent. Agent ${who} is decided ${decided.decision}${decided.note && !plain ? ` (${decided.note})` : ''}: a decided agent is never woken, ` +
       `so start a fresh agent from its notes. If you must wake it anyway, send again with the message starting "${cfg.overrideToken}".`
     )
   }

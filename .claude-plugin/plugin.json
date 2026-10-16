@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.21",
+  "version": "1.0.0-alpha.22",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -20,7 +20,7 @@
     "configPath": {
       "type": "string",
       "title": "Config file",
-      "description": "Path of Tether's JSON config. Empty: .claude/tether.json in the session's folder.",
+      "description": "Path of Tether's JSON config. Empty: .claude/tether.json in the session's folder. The TETHER_CONFIG environment variable wins over it.",
       "default": ""
     },
     "checkpointEnabled": {

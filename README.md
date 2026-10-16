@@ -146,13 +146,13 @@ run inside Claude Code (version 2.1.287 or later). See the
 ```
 
 Then set the config with `/plugin configure tether@tether` (the `configPath` option), or put the file at
-`.claude/tether.json` in your project. [`examples/tether.json`](examples/tether.json) shows the sections.
+`.claude/tether.json` in your project, or name it with the `TETHER_CONFIG` environment variable (see Config). [`examples/tether.json`](examples/tether.json) shows the sections.
 
 ## Config
 
 Every scalar setting is a plugin option: `/plugin configure tether@tether` lists them all. An option is a
 default for its section; the project file (`.claude/tether.json`, or the `configPath` option's file) wins field by
-field (except a `pane`, which a file replaces whole). Empty text and `0` mean "not set" (the section's own default
+field (except a `pane`, which a file replaces whole); a `locked` file ignores the options altogether. Empty text and `0` mean "not set" (the section's own default
 applies), except `watchTickSeconds`, where 0 turns the live countdown off. What has no option because it is
 structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.colors`, `checkpoint.sections` and
 `housekeeping.exclude`.
@@ -161,7 +161,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `configPath` | (empty) | Path of Tether's JSON config. Empty: .claude/tether.json in the session's folder. |
+| `configPath` | (empty) | Path of Tether's JSON config. Empty: .claude/tether.json in the session's folder. The TETHER_CONFIG environment variable wins over it. |
 | `checkpointEnabled` | `false` | Ask for a handoff, check it, clear and continue when the session is long and quiet. |
 | `checkpointContextTokens` | `200000` | The main session context at which a checkpoint is due. |
 | `checkpointQuietSeconds` | `5` | Seconds with no typing and no new message of yours before the checkpoint acts. A new message of yours re-queues it. |
@@ -215,9 +215,95 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 
 <!-- options:end -->
 
-One JSON file, one section per part (`fleet`, `watch`). Every key is optional; the defaults are in
-`src/fleet/config.ts` and `src/watch/config.ts`. Colours, column tints and emoji are fleet keys
-(`colors`, `columnTint`, `emoji`). `enabled` (default `true`) turns a whole section off.
+One JSON file, one section per part: `checkpoint`, `fleet`, `watch`, `housekeeping`, `conversations`, `stop` and
+`cacheGuard`. Every key is optional; the defaults are in each part's `src/*/config.ts`. Colours, column tints and
+emoji are fleet keys (`colors`, `columnTint`, `emoji`). `enabled` (default `true`; `false` for `checkpoint`) turns a
+whole section off; `cacheGuard.auto: false` turns off the agent guard's own actions. Every option above can also be
+set in the file, under its section.
+
+### Which file
+
+1. The `TETHER_CONFIG` environment variable, when set: an absolute path. It wins over everything below.
+2. Else the `configPath` option.
+3. Else `.claude/tether.json` in the session's folder (a missing one means "no file").
+
+The file is picked once each time the plugin loads; `/tether-watch reload` reads that same file again and applies it
+to every part.
+
+### Top-level keys
+
+| Key | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `locked` | boolean | `false` | The file's values are final: the plugin options are not read at all (defaults, then the file), no other file is read, and the file fails closed. |
+| `network` | boolean | `true` | `false`: no `prs` poller runs (and so no PR health command), and a command poller or `fleet.annotate` whose program is `gh`, `curl`, `wget`, `ssh`, `scp`, or `git` with `fetch`, `pull`, `push`, `clone`, `ls-remote`, `remote` or `submodule` (or a `-c alias.*`), is refused. The program is matched by its file name, in any case, without `.exe` (or `.cmd`, `.bat`, `.com`). |
+| `allowedCommands` | list of lists of strings | none | When set, a command runs only if its argv starts with one of these lists, exactly. It applies to every command Tether runs, its own included (`git rev-parse --git-path info/exclude` for housekeeping, `gh pr list` and `git -C <worktree> rev-parse` / `rev-list` for the PR guard), whether or not `network` is `false`. `[]` runs nothing. |
+| `plainOutput` | boolean | `false` | Everything Tether says is built from fixed templates filled only with ids, numbers and codes (see below). |
+
+A refused command is told by a code, never by its text: `refused:network` or `refused:not-allowed`, in
+`/tether-watch` and the log. The network rule matches programs by name, so a wrapper (a shell, an interpreter) that
+reaches the network itself is not caught: list exactly what may run with `allowedCommands`.
+
+### Failing closed
+
+A file named by `TETHER_CONFIG`, a file that says `"locked": true`, and a file seen locked earlier in the same load
+**fail closed**: when it is missing, unreadable, not JSON, not an object, or not valid, Tether turns every part off (no
+pollers, no refresh, no guard acting, no Stop block, no checkpoint, no handoff added, no housekeeping, no conversation
+logs, no store or file writes) and says so once, with the fixed text `tether: off, the config file is missing or not
+valid`, in the status line and a toast; every command answers with that text. It never falls back to the options,
+the defaults or `.claude/tether.json`. Not valid means: a `TETHER_CONFIG` that is not an absolute path, an unknown
+top-level key, a section that is not an object, a field an option feeds with the wrong type, a watch problem (a bad
+poller), or a top-level key of the table above with the wrong type. That last one fails closed in any file, locked
+or not. Any other file keeps the old behaviour: a missing or broken file falls back to the options and defaults.
+
+### plainOutput
+
+With `"plainOutput": true` every text Tether submits to the session (wake prompts), returns (Stop-hook and deny
+reasons, tool results, command answers), shows (toasts, the status line, pane cells) or writes (logs, the watch
+state file, the store) is a fixed template filled only with ids (poller, agent, task and session ids), numbers
+(tokens, minutes, counts, PR numbers) and codes from closed sets (agent states, PR causes, error codes such as `exit 2`
+or `refused:network`), besides values the config itself sets (the wake preamble, the keep-warm and handover messages,
+the override token, the handoff file and its headings). So:
+
+- an agent is named by its id, never by its description, name or type, and the annotate notes are not shown;
+- a PR problem is told as `#12: conflict`, `#12: checks-failed (2 checks)`, `#12: other` (a cause outside the closed
+  set): no branch, check name or detail; check names and dedupe keys are kept in the store as hashes;
+- a failure is a code: `exit N`, `refused:network`, `refused:not-allowed`, `bad-output` or `failed`; never stderr,
+  stdout, an error message or `TaskStop`'s error text (only how many tasks failed);
+- the model's notes (`pr_owner`, `agent_decision`) are not stored, an owner that is not id-like is kept as `?`, and a
+  cause outside the closed set as `other`;
+- a poller is named by its id (not its `title`); `/tether-fleet text` and the handoff added at session start are off;
+  the fleet pane does not draw a watch state file (use `/tether-watch pane`);
+- watch keeps its seen-set, findings and logs under their own store names, so nothing told before is told again.
+
+A command poller under `plainOutput` reads only JSON lines `{ "key": "<id>", "code": "<code>" }`: `key` matches
+`^[A-Za-z0-9._:-]{1,64}$`, `code` is one of the poller's `codes` (a list of such ids in its config), and the object has
+no other field. It is told as `<key> <code>`. Every other line is dropped and only counted (`/tether-watch` shows
+`N dropped`); its `format`, `match` and `key` settings are not used. Conversation logs are your own copy of the session
+and are written as before; turn them off with `"conversations": { "enabled": false }`.
+
+### A locked zone
+
+A minimal file for a session that may not reach the network and may only repeat ids, numbers and codes, named with
+`TETHER_CONFIG=/path/to/zone.json`:
+
+```json
+{
+  "locked": true,
+  "network": false,
+  "plainOutput": true,
+  "allowedCommands": [["node", "tools/check.js"]],
+  "conversations": { "enabled": false },
+  "housekeeping": { "enabled": false },
+  "watch": {
+    "pollers": [
+      { "id": "agents", "kind": "agents", "everySeconds": 60 },
+      { "id": "check", "command": ["node", "tools/check.js"], "everySeconds": 300, "codes": ["failed", "stale"] }
+    ]
+  }
+}
+```
+
+`tools/check.js` then prints lines such as `{"key":"job-12","code":"failed"}`.
 
 ## Develop
 

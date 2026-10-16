@@ -3,6 +3,7 @@
 import type { AgentsPoller, CommandPoller } from './config'
 import { undecided, type AgentRules } from '../guards/agents'
 import type { GuardStore } from '../guards/store'
+import { ID_LIKE } from '../options/plain'
 
 /** One thing a poller reports. `key` is what dedupe remembers (e.g. PR + cause + head sha). */
 export type Finding = { key: string; text: string }
@@ -59,6 +60,39 @@ export function readOutput(p: CommandPoller, run: { exitCode: number; stdout: st
     findings.push({ key: keyOf(text, p.key), text })
   }
   return { ok: true, findings }
+}
+
+/**
+ * Reads a command's result under `plainOutput`: only JSON lines `{ "key": <id>, "code": <one of the poller's codes> }`
+ * are findings, told as `<key> <code>`; every other line is dropped and only counted. A failure is told by its exit
+ * code alone, never by what the command printed.
+ */
+export function readPlainOutput(p: CommandPoller, run: { exitCode: number; stdout: string }): { ok: true; findings: Finding[]; dropped: number } | { ok: false; error: string } {
+  if (p.quietExitCodes.includes(run.exitCode)) return { ok: true, findings: [], dropped: 0 }
+  if (!p.okExitCodes.includes(run.exitCode)) return { ok: false, error: `exit ${Number.isInteger(run.exitCode) ? run.exitCode : -1}` }
+  const allowed = new Set(p.codes)
+  const findings: Finding[] = []
+  let dropped = 0
+  for (const raw of String(run.stdout).split(/\r?\n/)) {
+    const line = raw.trim()
+    if (line === '') continue
+    let item: unknown
+    try {
+      item = JSON.parse(line)
+    } catch {
+      dropped++
+      continue
+    }
+    const o = item as Record<string, unknown> | null
+    const ok = o !== null && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).length === 2 &&
+      typeof o.key === 'string' && ID_LIKE.test(o.key) && typeof o.code === 'string' && allowed.has(o.code)
+    if (!ok) {
+      dropped++
+      continue
+    }
+    findings.push({ key: `${o!.key}|${o!.code}`, text: `${o!.key} ${o!.code}` })
+  }
+  return { ok: true, findings, dropped }
 }
 
 /** One subagent as watch sees it: the engine's list entry plus what its model requests showed. */

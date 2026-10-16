@@ -21,7 +21,7 @@ export type Entry = { option: string; section: Section; field: string; kind: Kin
 export const CONFIG_PATH = {
   option: 'configPath',
   title: 'Config file',
-  description: "Path of Tether's JSON config. Empty: .claude/tether.json in the session's folder.",
+  description: "Path of Tether's JSON config. Empty: .claude/tether.json in the session's folder. The TETHER_CONFIG environment variable wins over it.",
   default: '',
 }
 
