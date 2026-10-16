@@ -19,7 +19,7 @@ import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type Watch
 import { agentFindings, fresh, readOutput, readPlainOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
-import { askText, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
+import { askText, backedOff, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 import { alerted, decisionProblem, planActions, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
 import { CACHE_GUARD_DEFAULTS, mergeCacheGuard, type CacheGuardConfig } from '../src/guards/config'
 import { ACTIVE_RERUN, CAUSES, GH_FIELDS, fromGh, plainProblem, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
@@ -981,6 +981,8 @@ const registerWatch: Register = (on) => {
 // the continue cannot lose it.
 
 const CHECKPOINT_CONTINUE_KEY = 'checkpoint:continue'
+/** How long after the clear command the new session must have started, or the clear counts as not done. */
+const CLEAR_WAIT_MS = 30_000
 let cpCfg: CheckpointConfig = CHECKPOINT_DEFAULTS
 /** The plugin's options (`/plugin configure tether@tether`): the defaults the project file overrides. */
 let options: Record<string, unknown> = {}
@@ -1060,21 +1062,33 @@ async function carryOut($: any, action: Action, problems: string[] | undefined):
     await $.command.run({ command: 'clear' })
   } catch (err) {
     $.ui.log(plain() ? 'checkpoint: the clear failed' : `checkpoint: the clear failed: ${err}`)
+    await clearNotDone($)
+    return
   }
-  // The new session's start normally clears the flag before this returns; a flag still set means no clear happened
-  if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) === true) {
-    await $.store.set(CHECKPOINT_CONTINUE_KEY, false)
-    cpState = initialCycle()
-    $.ui.toast('checkpoint: the clear did not happen')
-  }
+  // The new session's start takes the flag; it may come after the command returns, so look again later
+  $.clock.after(CLEAR_WAIT_MS, async () => {
+    if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) === true) await clearNotDone($)
+  })
 }
 
-/** After a clear, the new session continues from the handoff (after a second, so the session has settled). */
+/** The clear did not happen: drop the continue and wait before asking again, since the session is still long. */
+async function clearNotDone($: any): Promise<void> {
+  await $.store.set(CHECKPOINT_CONTINUE_KEY, false)
+  cpState = backedOff(await $.clock.now(), cpCfg)
+  $.ui.toast('checkpoint: the clear did not happen')
+}
+
+/**
+ * After any clear, Tether's or the person's: the cycle starts over and the old session's context size is
+ * forgotten (it survives /clear, and would make the new session look due at once). When the clear was the
+ * checkpoint's, the new session continues from the handoff (after a second, so the session has settled).
+ */
 async function checkpointAfterClear($: any): Promise<void> {
+  cpState = initialCycle()
+  ledger.delete('main')
   if (halted) return
   if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) !== true) return
   await $.store.set(CHECKPOINT_CONTINUE_KEY, false)
-  cpState = initialCycle()
   $.clock.after(1000, () => $.prompt.submit({ text: continueText(cpCfg) }))
 }
 

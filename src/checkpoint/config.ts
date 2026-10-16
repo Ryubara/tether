@@ -20,6 +20,8 @@ export type CheckpointConfig = {
   injectHandoff: boolean
   /** Repair attempts before the cycle gives up and the session carries on. */
   maxRepairs: number
+  /** Minutes to wait before asking again after a give-up or a clear that did not happen. */
+  retryMinutes: number
 }
 
 export const CHECKPOINT_DEFAULTS: CheckpointConfig = {
@@ -31,6 +33,7 @@ export const CHECKPOINT_DEFAULTS: CheckpointConfig = {
   maxChars: 9_500,
   sections: ['## Where to look', '## Summary', '## Next steps', '## Open questions'],
   maxRepairs: 3,
+  retryMinutes: 15,
   injectHandoff: false,
 }
 
@@ -41,7 +44,7 @@ export function mergeCheckpoint(raw: unknown): CheckpointConfig {
   const r = raw as Record<string, unknown>
   if (typeof r.enabled === 'boolean') out.enabled = r.enabled
   if (typeof r.injectHandoff === 'boolean') out.injectHandoff = r.injectHandoff
-  for (const k of ['contextTokens', 'quietSeconds', 'tickSeconds', 'maxChars', 'maxRepairs'] as const) {
+  for (const k of ['contextTokens', 'quietSeconds', 'tickSeconds', 'maxChars', 'maxRepairs', 'retryMinutes'] as const) {
     if (typeof r[k] === 'number' && Number.isFinite(r[k]) && (r[k] as number) > 0) out[k] = r[k] as number
   }
   if (typeof r.handoffFile === 'string' && r.handoffFile.trim() !== '') out.handoffFile = r.handoffFile.trim()

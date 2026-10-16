@@ -38,6 +38,8 @@ run inside Claude Code (version 2.1.287 or later). See the
   the model to write the handoff file (`HANDOFF.md` by default), checks it (the headings in `sections` and the
   `maxChars` limit), repairs it up to `maxRepairs` times, then runs `/clear` and continues from it. It never
   clears over a handoff that fails its check. Nothing is cleared while you are typing or a turn is running.
+  Any clear, its own or yours, starts the cycle over with the old session's context forgotten. After a give-up, or
+  a clear that did not happen, it waits `retryMinutes` (default 15) before asking again.
   With `"injectHandoff": true` (off by default), every session start (new, resumed, cleared or compacted) adds the
   handoff's text to the session as context, under a header line, cut at 400 lines with a note to trim it; a missing
   or empty handoff adds nothing. It works through the `SessionStart` hook's `additionalContext`, the one place
@@ -171,6 +173,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `checkpointMaxChars` | `9500` | The handoff is injected into the next session, so it must stay under this size. |
 | `checkpointInjectHandoff` | `false` | When a session starts (new, resumed, cleared or compacted) and the handoff file exists, add its text to the session as context. |
 | `checkpointMaxRepairs` | `3` | Repair attempts before the cycle gives up and the session carries on. |
+| `checkpointRetryMinutes` | `15` | After a give-up or a clear that did not happen, minutes before the checkpoint asks for a handoff again. |
 | `fleetEnabled` | `true` | The agents pane, the status line and the SendMessage guard. |
 | `fleetCacheTtlMinutes` | `60` | How long the prompt cache is taken to live after an agent's last request (5, or 60 with subagentPromptCacheTtl 1h). It is also the idle time from which waking an undecided big agent is refused, so a lower value adds a safety margin before the real expiry. |
 | `fleetBigContextTokens` | `60000` | Context size from which an agent is guarded: the agent guard acts on it before its cache expires, and a wake-up is refused once its cache has expired. |

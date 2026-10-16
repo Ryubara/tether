@@ -18,6 +18,8 @@ export type CycleState = {
   dirty: boolean
   /** Repair requests sent for the current handoff. */
   repairs: number
+  /** While idle, no handoff is asked for before this time (ms): set after a give-up or a clear that did not happen. */
+  retryAt: number
 }
 
 /** What the session looked like at one tick. */
@@ -35,7 +37,10 @@ export type Observed = {
 export type Action = 'none' | 'ask' | 'update' | 'repair' | 'clear' | 'give-up'
 
 /** A cycle that is idle and has asked for nothing. */
-export const initialCycle = (): CycleState => ({ phase: 'idle', quietSince: 0, askedMessages: 0, dirty: false, repairs: 0 })
+export const initialCycle = (): CycleState => ({ phase: 'idle', quietSince: 0, askedMessages: 0, dirty: false, repairs: 0, retryAt: 0 })
+
+/** An idle cycle that waits `retryMinutes` before asking again, after a give-up or a clear that did not happen. */
+export const backedOff = (now: number, cfg: CheckpointConfig): CycleState => ({ ...initialCycle(), retryAt: now + cfg.retryMinutes * 60_000 })
 
 /** One tick of the cycle: the next state and the action to carry out. */
 export function step(state: CycleState, o: Observed, cfg: CheckpointConfig): { state: CycleState; action: Action } {
@@ -44,8 +49,8 @@ export function step(state: CycleState, o: Observed, cfg: CheckpointConfig): { s
 
   if (state.phase === 'idle') {
     // Due, and the person is not in the middle of anything: ask for the handoff
-    if (cfg.enabled && o.contextTokens >= cfg.contextTokens && quiet) {
-      return { state: { phase: 'asked', quietSince: o.now, askedMessages: o.messages, dirty: false, repairs: 0 }, action: 'ask' }
+    if (cfg.enabled && o.contextTokens >= cfg.contextTokens && quiet && o.now >= state.retryAt) {
+      return { state: { phase: 'asked', quietSince: o.now, askedMessages: o.messages, dirty: false, repairs: 0, retryAt: 0 }, action: 'ask' }
     }
     return { state, action: 'none' }
   }
@@ -68,8 +73,9 @@ export function step(state: CycleState, o: Observed, cfg: CheckpointConfig): { s
   if (state.repairs < cfg.maxRepairs) {
     return { state: { ...state, repairs: state.repairs + 1, quietSince: o.now }, action: 'repair' }
   }
-  // The handoff never passed: give up and let the session carry on rather than clear over a bad handoff
-  return { state: initialCycle(), action: 'give-up' }
+  // The handoff never passed: give up and let the session carry on rather than clear over a bad handoff, and
+  // wait before asking again, since the session is still long
+  return { state: backedOff(o.now, cfg), action: 'give-up' }
 }
 
 /** M:SS, for the countdown in the pane. */
@@ -86,6 +92,7 @@ export function describeCycle(state: CycleState, o: Observed, cfg: CheckpointCon
   if (!cfg.enabled) return 'checkpoint: off'
   if (state.phase === 'idle') {
     if (o.contextTokens < cfg.contextTokens) return `checkpoint: due at ${Math.round(cfg.contextTokens / 1000)}k (now ${Math.round(o.contextTokens / 1000)}k)`
+    if (o.now < state.retryAt) return `checkpoint due: asking again in ${clock(state.retryAt - o.now)}`
     if (o.busy) return 'checkpoint due: waiting for the turn to end'
     if (o.draft !== '') return 'checkpoint due: waiting for your draft to be sent or cleared'
     return 'checkpoint due: asking for the handoff now'
