@@ -1781,7 +1781,7 @@ export const register: Register = (on, opts) => {
     await checkpointStart($)
     await guardsStart($)
     await housekeepingStart($)
-    if (!halted) await registerGuardTools($)
+    if (!halted && gCfg.registerTools) await registerGuardTools($)
     try {
       await $.command.register({ ...registration(GUARDS), immediate: true })
     } catch {}
@@ -1812,7 +1812,8 @@ export const register: Register = (on, opts) => {
   // `stop.maxBlocks` times in a row for the same reason.
   on('classic.Stop', async ($, e, next) => {
     const r: any = await next(e)
-    if (!stopCfg.enabled) return r
+    // Without the guard tools nothing can clear the reason, so it never blocks
+    if (!stopCfg.enabled || !gCfg.registerTools) return r
     const now = await $.clock.now()
     const store = await guardStore($)
     // Look again, so a ping or a decision since the last tick counts

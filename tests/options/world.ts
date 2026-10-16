@@ -27,6 +27,8 @@ export type World = {
   statuses: string[]
   /** Every pane Tether asked ui.open for. */
   opened: Array<Record<string, unknown>>
+  /** The name of every tool Tether registered. */
+  registered: string[]
   /** What fs.write wrote, by path. */
   writes: Record<string, string>
   /** The store, and every value written to it (key and JSON). */
@@ -58,6 +60,7 @@ export function world(over: Partial<World> = {}): World {
     logs: [],
     statuses: [],
     opened: [],
+    registered: [],
     writes: {},
     store: new Map(),
     storeWrites: [],
@@ -89,7 +92,10 @@ export async function start($: any, on: any, w: World) {
   })
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', () => ({ value: undefined }))
-  on('tool.register', () => ({ value: { tool: 'x' } }))
+  on('tool.register', ($: any, e: any) => {
+    w.registered.push(String(e.name))
+    return { value: { tool: 'x' } }
+  })
   on('env.get', ($: any, e: any) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : w.env[e.name] }))
   on('session.cwd', () => ({ value: '/work' }))
   on('session.id', () => ({ value: w.sessionId }))
