@@ -16,15 +16,17 @@ import { Boxes, parseState, type WatchState } from '../src/fleet/boxes'
 import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type Poller, type WatchConfig } from '../src/watch/config'
 import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type WatchState as WatchStateData } from '../src/watch/boxes'
-import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
+import { agentFindings, fresh, readOutput, readPlainOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 import { alerted, decisionProblem, planActions, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
 import { CACHE_GUARD_DEFAULTS, mergeCacheGuard, type CacheGuardConfig } from '../src/guards/config'
-import { ACTIVE_RERUN, GH_FIELDS, fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
+import { ACTIVE_RERUN, CAUSES, GH_FIELDS, fromGh, plainProblem, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
 import { NEW_CYCLE, pruneOwners, readStore, recordAction, recordAlert, recordDecision, recordOwner, recordRerun, type GuardStore } from '../src/guards/store'
 import { layered } from '../src/options/options'
+import { DEFAULT_CONFIG_FILE, HALT_TEXT, OPEN_POLICY, commandRefusal, configSource, judge, type Policy, type Refusal, type Source } from '../src/options/policy'
+import { AGENT_STATUSES, hashKey, plainCode, plainError, plainId, plainLimitKind } from '../src/options/plain'
 import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
 import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
 import { FLEET, GUARDS, WATCH, registration } from '../src/commands/commands'
@@ -40,9 +42,9 @@ import { logName, renderConversation, type LogMessage } from '../src/conversatio
 
 
 const PANE = 'fleet'
-/** The config file when the `configPath` option is empty, relative to the session's working directory. */
-const CONFIG_FILE = '.claude/tether.json'
-/** The config file in use: the `configPath` option, else CONFIG_FILE. */
+/** The config file when neither TETHER_CONFIG nor the `configPath` option names one, relative to the session's working directory. */
+const CONFIG_FILE = DEFAULT_CONFIG_FILE
+/** The config file in use: TETHER_CONFIG, else the `configPath` option, else CONFIG_FILE. */
 let configFile = CONFIG_FILE
 
 let cfg: FleetConfig = DEFAULTS
@@ -90,10 +92,14 @@ function dayKey(now: number): string {
 let fleetStatus: string | undefined
 let watchStatus: string | undefined
 function showStatus($: any): void {
-  $.ui.status([fleetStatus, watchStatus].filter(Boolean).join('  |  ') || undefined)
+  $.ui.status(halted ? HALT_TEXT : [fleetStatus, watchStatus].filter(Boolean).join('  |  ') || undefined)
 }
 
-/** Reads Tether's config file (one file, a section per part); undefined when it is missing or unreadable. */
+/**
+ * Reads Tether's config file (one file, a section per part); no root when it is missing or unreadable. The file is
+ * picked once per load of the module (TETHER_CONFIG, else the `configPath` option, else CONFIG_FILE), so a reload
+ * re-reads the same file. A file that fails closed (see src/options/policy.ts) turns every part off.
+ */
 let rootCache: { root?: Record<string, unknown>; problem?: string } | undefined
 async function readTetherConfig($: any, reuse = false): Promise<{ root?: Record<string, unknown>; problem?: string }> {
   if (reuse && rootCache) return rootCache
@@ -101,33 +107,100 @@ async function readTetherConfig($: any, reuse = false): Promise<{ root?: Record<
   return rootCache
 }
 async function readTetherFile($: any): Promise<{ root?: Record<string, unknown>; problem?: string }> {
-  try {
-    if (!(await $.fs.exists(configFile))) {
-      // A missing file is normal for the default path, but a configured one should exist
-      return configFile === CONFIG_FILE ? {} : { problem: `${configFile} not found` }
+  if (!source) {
+    let env: string | undefined
+    try {
+      // The literal name, so the engine can list what the module reads (it is CONFIG_ENV)
+      env = (await $.env.get('TETHER_CONFIG')) ?? undefined
+    } catch {
+      // An environment Tether cannot read names no file
     }
-    const root = JSON.parse(await $.fs.read(configFile))
-    return root && typeof root === 'object' ? { root } : { problem: `${configFile} is not an object` }
-  } catch (err) {
-    return { problem: `${configFile} not used: ${err}` }
+    source = configSource(env, options.configPath)
+    configFile = source.file
+    watchConfigFile = source.file
   }
+  let read: { text: string } | 'missing' | { error: unknown } = 'missing'
+  if (source.file !== '') {
+    try {
+      read = (await $.fs.exists(source.file)) ? { text: String(await $.fs.read(source.file)) } : 'missing'
+    } catch (err) {
+      read = { error: err }
+    }
+  }
+  const loaded = judge(source, read, lockedSeen)
+  if (loaded.locked) lockedSeen = true
+  policy = loaded.policy
+  setHalt($, loaded.halt)
+  return loaded.halt ? {} : { ...(loaded.root ? { root: loaded.root } : {}), ...(loaded.problem ? { problem: loaded.problem } : {}) }
 }
+
+/** Where the config comes from, picked at the first read of each module load. */
+let source: Source | undefined
+/** The config file's rules (locked, network, allowed commands, plain output). */
+let policy: Policy = OPEN_POLICY
+/** Every part is off: the config file failed closed. */
+let halted = false
+/** The halt was told (status line and toast), so it is told once, not at every read. */
+let haltTold = false
+/** A locked file was read in this load of the module: from then on it fails closed too. */
+let lockedSeen = false
+
+/** The plugin options as the layer under the file; a locked file's values are final, so then there is none. */
+function optionLayer(): Record<string, unknown> {
+  return policy.locked ? {} : options
+}
+
+/** Whether everything Tether says is built from fixed templates, ids, numbers and codes only. */
+function plain(): boolean {
+  return policy.plainOutput
+}
+
+/** Turns the halt on or off; going on tells it once in a toast, and the status line says it while it lasts. */
+function setHalt($: any, on: boolean): void {
+  halted = on
+  if (!on) {
+    haltTold = false
+    return
+  }
+  if (haltTold) return
+  haltTold = true
+  try {
+    $.ui.toast(HALT_TEXT)
+  } catch {}
+  showStatus($)
+}
+
+/**
+ * Runs a command unless the policy refuses it (`network: false`, `allowedCommands`); a refusal answers with its
+ * code in `refused` and exit code -1, and nothing runs.
+ */
+async function runChecked($: any, argv: string[], init: Record<string, unknown>): Promise<{ exitCode: number; stdout: string; stderr: string; refused?: Refusal }> {
+  const refused = commandRefusal(argv, policy)
+  if (refused) return { exitCode: -1, stdout: '', stderr: '', refused }
+  return $.process.run(argv, init)
+}
+
+/** The fleet settings while halted: off, no guard. */
+const FLEET_OFF: FleetConfig = { ...DEFAULTS, enabled: false, coldGuard: false }
 
 /** Reads the fleet section of the config, falling back to the defaults on any problem. */
 async function loadConfig($: any): Promise<FleetConfig> {
   const { root, problem } = await readTetherConfig($, true)
+  if (halted) return FLEET_OFF
   if (problem) $.ui.log(`fleet: ${problem}; using the defaults`)
   // The plugin's option is the default for `enabled`; the project's section overrides it
-  return mergeConfig(layered(options, 'fleet', root?.fleet))
+  return mergeConfig(layered(optionLayer(), 'fleet', root?.fleet))
 }
 
 /** Re-reads the agent list and usage, then updates the status line and the pane. */
 async function refresh($: any): Promise<void> {
+  if (halted) return
   try {
     agents = (await $.agent.list()) as AgentLike[]
   } catch {}
   try {
     if (cfg.showSession) limits = ((await $.session.usage())?.rateLimits ?? []) as RateLimit[]
+    if (plain()) limits = limits.map(l => ({ kind: plainLimitKind(l.kind), percentUsed: Number(l.percentUsed) || 0 }))
   } catch {}
   await noteProjectDir($)
   await backfill($)
@@ -226,12 +299,13 @@ async function annotate($: any): Promise<void> {
   if (!cfg.annotate || annotating) return
   annotating = true
   try {
-    const r = await $.process.run(cfg.annotate.command, { timeoutMs: cfg.annotate.timeoutMs ?? 30_000 })
+    const r = await runChecked($, cfg.annotate.command, { timeoutMs: cfg.annotate.timeoutMs ?? 30_000 })
+    if (r.refused) throw new Error(r.refused)
     const parsed = JSON.parse(r.stdout)
     if (parsed && typeof parsed === 'object') notes = parsed as Record<string, string>
   } catch (err) {
     // A failing adapter only loses its notes; fleet works without them. Say so once per new reason.
-    const why = String(err)
+    const why = plain() ? plainError((err as Error)?.message) : String(err)
     if (why !== lastAnnotateError) $.ui.log(`fleet: annotate command failed: ${why}`)
     lastAnnotateError = why
   } finally {
@@ -241,6 +315,16 @@ async function annotate($: any): Promise<void> {
 
 /** The rows for the current agents, each named by its Agent call's `name` when the list lacks one. */
 function currentRows(now: number): Row[] {
+  if (plain()) {
+    // Ids, numbers and codes only: no name, description, type or annotate note
+    const bare = agents.map(a => {
+      const end = finished.get(a.id)
+      const stale = a.status === 'running' && end !== undefined && end >= (ledger.get(a.id)?.lastStepAt ?? 0) && now - end >= 30_000
+      return { id: plainId(a.id), status: stale ? 'completed' : plainCode(a.status, AGENT_STATUSES) }
+    })
+    const byIdNotes = Object.fromEntries(agents.flatMap(a => [a.id, a.name, a.description].filter((k): k is string => !!k && notes[k] !== undefined).slice(0, 1).map(k => [plainId(a.id), notes[k]!])))
+    return buildRows(bare, ledger, byIdNotes, now, cfg, Object.fromEntries(guardMarks)).map(({ note: _note, ...r }) => r)
+  }
   const byId = new Map([...names].map(([name, id]) => [id, name]))
   const named = agents.map(a => ({
     ...a,
@@ -257,6 +341,15 @@ function currentRows(now: number): Row[] {
 }
 
 const fleetStart = async ($: any, e: any, next: any): Promise<any> => {
+  await fleetConfigure($)
+  try {
+    await $.command.register({ ...registration(FLEET), immediate: true })
+  } catch {}
+  return next(e)
+}
+
+/** Reads fleet's settings and (re)starts its timers. */
+async function fleetConfigure($: any): Promise<void> {
   cfg = await loadConfig($)
   const now = await $.clock.now()
   coldToday = Number((await $.store.get(dayKey(now))) ?? 0)
@@ -269,10 +362,6 @@ const fleetStart = async ($: any, e: any, next: any): Promise<any> => {
     // The first notes come soon after start rather than a whole interval later
     timers.push($.clock.after(1000, () => annotate($).then(() => refresh($))) as any)
   }
-  try {
-    await $.command.register({ ...registration(FLEET), immediate: true })
-  } catch {}
-  return next(e)
 }
 
 const fleetComplete = async ($: any, e: any, next: any): Promise<any> => {
@@ -291,8 +380,8 @@ async function* fleetStep($: any, e: any, next: any): any {
     if (v.isColdWake && cfg.enabled) {
       coldToday += v.written
       void $.store.set(dayKey(now), coldToday)
-      const who = agents.find(a => a.id === id)
-      const text = `${who?.name ?? who?.description ?? id} woke after ${Math.round(v.idleMinutes)} min and re-wrote ${tokens(v.written)} cache tokens`
+      const who = plain() ? undefined : agents.find(a => a.id === id)
+      const text = `${who?.name ?? who?.description ?? plainId(id)} woke after ${Math.round(v.idleMinutes)} min and re-wrote ${tokens(v.written)} cache tokens`
       $.ui.toast(text)
       $.ui.log('fleet: ' + text)
     }
@@ -300,16 +389,21 @@ async function* fleetStep($: any, e: any, next: any): any {
   return result
 }
 
-const registerFleet: Register = (on, options) => {
-  const path = (options as { configPath?: unknown } | undefined)?.configPath
-  configFile = typeof path === 'string' && path.trim() !== '' ? path.trim() : CONFIG_FILE
+/** What `/tether-fleet text` answers under plainOutput: the table is not put in the transcript. */
+const PLAIN_FLEET_TEXT = 'tether: /tether-fleet text is off under plainOutput; open the pane with /tether-fleet'
+
+const registerFleet: Register = (on) => {
+  // The config file is picked at the first read (it needs the environment): a new load picks again
+  source = undefined
+  rootCache = undefined
+  lockedSeen = false
 
 
   // Every model request, main loop and subagents alike: keep the ledger, and flag a cold re-write.
 
   // Waking a decided agent, or a big one on an expired cache: refuse, with the reason and the way to insist.
   on('tool.call', { tool: 'SendMessage' }, async ($, e, next) => {
-    const deny = coldGuard(e as any, agents, ledger, await $.clock.now(), cfg, names, (await guardStore($)).decisions)
+    const deny = coldGuard(e as any, agents, ledger, await $.clock.now(), cfg, names, (await guardStore($)).decisions, plain())
     return deny ? { deny } : next(e)
   }).catch(($, e, next) => next(e))
 
@@ -333,8 +427,11 @@ const registerFleet: Register = (on, options) => {
 
   // `/tether-fleet` opens the pane; `/tether-fleet text` answers in the transcript (also what headless sessions get).
   on('command.run', { command: FLEET.name }, async ($, e) => {
+    if (halted) return { text: HALT_TEXT }
     await refresh($)
     const wantsText = (e as any).args?.trim() === 'text'
+    // Under plainOutput the transcript gets no table: it is a text the session keeps
+    if (plain() && wantsText) return { text: PLAIN_FLEET_TEXT }
     let placed = false
     if (!wantsText) {
       try {
@@ -343,6 +440,7 @@ const registerFleet: Register = (on, options) => {
     }
     // Where no pane can show (headless, or asked for text), answer in the transcript instead.
     if (wantsText || !placed) {
+      if (plain()) return { text: PLAIN_FLEET_TEXT }
       const now = await $.clock.now()
       const rows = currentRows(now)
       return { text: [summary(rows, ledger.get('main')?.contextTokens, limits, coldToday, cfg), ...(rows.length ? [headerCells(cfg).map(c => c.text).join('').trimEnd()] : []), ...rows.map(r => rowText(r, cfg))].join('\n') }
@@ -396,7 +494,7 @@ const registerFleet: Register = (on, options) => {
             {legend(rows, cfg)}
           </Text>
         )}
-        {watchBoxes && Boxes($.ui.resolve(e), watchBoxes, now, (e as any).props?.bodyColumns ?? 80)}
+        {watchBoxes && !plain() && Boxes($.ui.resolve(e), watchBoxes, now, (e as any).props?.bodyColumns ?? 80)}
       </Box>
     )
   })
@@ -422,7 +520,7 @@ const WATCH_PANE = 'watch'
 const LOG_KEEP = 50
 
 /** What the last run of a poller came to, for /tether-watch and the status line. */
-type LastRun = { at: number; ok: boolean; found: number; told: number; error?: string }
+type LastRun = { at: number; ok: boolean; found: number; told: number; error?: string; /** Lines a plainOutput command printed that were not findings. */ dropped?: number }
 
 let watchConfigFile = WATCH_CONFIG_FILE
 let wcfg: WatchConfig = WATCH_DEFAULTS
@@ -451,24 +549,37 @@ let pendingCount = 0
 let stateError = ''
 
 /** The $.store keys of this config's seen-set and pending findings. */
-const seenKey = () => `seen:${wcfg.storeName}`
-const pendingKey = () => `pending:${wcfg.storeName}`
-const logKey = () => `log:${wcfg.storeName}`
+const seenKey = () => `seen:${storeSpace()}`
+const pendingKey = () => `pending:${storeSpace()}`
+const logKey = () => `log:${storeSpace()}`
+/** The store name; plainOutput keeps its own seen-set, findings and logs, so nothing told before it is told under it. */
+const storeSpace = () => (plain() ? `plain:${wcfg.storeName}` : wcfg.storeName)
 
 /** Reads and parses the config file; problems are logged once per load. */
 async function loadWatchConfig($: any, watchReuse = false): Promise<void> {
   const { root, problem } = await readTetherConfig($, watchReuse)
+  if (halted) {
+    wcfg = { ...WATCH_DEFAULTS, enabled: false, pollers: [] }
+    problems = []
+    return
+  }
   if (problem) {
     wcfg = WATCH_DEFAULTS
     problems = [problem]
   } else {
     // Without a file the options alone are the settings
     // An agents poller without its own contextTokens wakes at the subagent max context, the fleet setting
-    const parsed = parseConfig(layered(options, 'watch', root?.watch), mergeConfig(layered(options, 'fleet', root?.fleet)).retireContextTokens)
+    const parsed = parseConfig(layered(optionLayer(), 'watch', root?.watch), mergeConfig(layered(optionLayer(), 'fleet', root?.fleet)).retireContextTokens)
     wcfg = parsed.config
     problems = parsed.problems
+    if (!policy.network) {
+      // `network: false`: the PR guard reads GitHub, so its pollers do not run
+      for (const p of wcfg.pollers) if (p.kind === 'prs') $.ui.log(`watch: ${p.id} is off (network is false)`)
+      wcfg = { ...wcfg, pollers: wcfg.pollers.filter(p => p.kind !== 'prs') }
+    }
   }
-  for (const p of problems) $.ui.log(`watch: ${p}`)
+  if (plain() && problems.length > 0) $.ui.log(`watch: ${problems.length} config problem${problems.length === 1 ? '' : 's'}`)
+  else for (const p of problems) $.ui.log(`watch: ${p}`)
   const saved = await $.store.get(logKey())
   logs = saved && typeof saved === 'object' ? (saved as Record<string, LogLine[]>) : {}
 }
@@ -482,13 +593,18 @@ async function getPending($: any): Promise<Pending[]> {
 }
 
 /** Runs one command poller and returns its findings, or an error. */
-async function runCommand($: any, p: CommandPoller): Promise<{ findings?: Finding[]; error?: string }> {
+async function runCommand($: any, p: CommandPoller): Promise<{ findings?: Finding[]; error?: string; dropped?: number }> {
   try {
-    const r = await $.process.run(p.command, { timeoutMs: p.timeoutMs, ...(p.cwd ? { cwd: p.cwd } : {}) })
+    const r = await runChecked($, p.command, { timeoutMs: p.timeoutMs, ...(p.cwd ? { cwd: p.cwd } : {}) })
+    if (r.refused) return { error: r.refused }
+    if (plain()) {
+      const out = readPlainOutput(p, r)
+      return out.ok ? { findings: out.findings, dropped: out.dropped } : { error: out.error }
+    }
     const out = readOutput(p, r)
     return out.ok ? { findings: out.findings } : { error: out.error }
   } catch (err) {
-    return { error: String(err) }
+    return { error: plain() ? 'failed' : String(err) }
   }
 }
 
@@ -515,7 +631,9 @@ async function agentsSeen($: any, now: number): Promise<AgentSeen[]> {
     return {
       id: a.id,
       status: a.status,
-      label: a.name ?? a.description ?? a.type ?? a.id,
+      // Under plainOutput every line about an agent names it by its id
+      label: plain() ? plainId(a.id) : a.name ?? a.description ?? a.type ?? a.id,
+      ...(plain() ? { status: plainCode(a.status, AGENT_STATUSES) } : {}),
       lastStepAt: s?.at ?? l?.lastStepAt ?? firstSeen.get(a.id)!,
       ...(s ? { contextTokens: s.context } : l ? { contextTokens: l.contextTokens } : {}),
       ...(finished.has(a.id) ? { finishedAt: finished.get(a.id)! } : {}),
@@ -532,7 +650,7 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
   running.add(p.id)
   await publish($)
   try {
-    let result: { findings?: Finding[]; error?: string }
+    let result: { findings?: Finding[]; error?: string; dropped?: number }
     if (p.kind === 'agents') {
       try {
         const at = await $.clock.now()
@@ -550,6 +668,10 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
       result = await runCommand($, p)
     }
     const now = await $.clock.now()
+    // Under plainOutput a failure is a code, a key is kept as a hash, and the poller is named by its id
+    if (plain() && result.error !== undefined) result = { error: plainError(result.error) }
+    if (plain() && result.findings) result = { ...result, findings: result.findings.map(f => ({ key: hashKey(f.key), text: f.text })) }
+    const title = plain() ? p.id : p.title
     if (!result.findings) {
       // Say a failure once per new reason; the status line keeps showing it
       const before = lastRun.get(p.id)
@@ -560,15 +682,15 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
     const seen = ((await $.store.get(seenKey())) ?? {}) as Seen
     const next = fresh(seen, p, result.findings, now)
     await $.store.set(seenKey(), next.seen)
-    lastRun.set(p.id, { at: now, ok: true, found: result.findings.length, told: next.fresh.length })
+    lastRun.set(p.id, { at: now, ok: true, found: result.findings.length, told: next.fresh.length, ...(result.dropped ? { dropped: result.dropped } : {}) })
     if (next.fresh.length > 0) {
       await addLog($, p.id, now, next.fresh.map(f => f.text))
-      $.ui.toast(`watch: ${next.fresh.length} new from ${p.title}`)
+      $.ui.toast(`watch: ${next.fresh.length} new from ${title}`)
       if (p.wake) {
-        const add = next.fresh.map(f => ({ ...f, poller: p.id, title: p.title, wake: true, at: now }))
+        const add = next.fresh.map(f => ({ ...f, poller: p.id, title, wake: true, at: now }))
         await $.store.set(pendingKey(), [...(await getPending($)), ...add])
       } else {
-        for (const f of next.fresh) $.ui.log(`watch: ${p.title}: ${f.text}`)
+        for (const f of next.fresh) $.ui.log(`watch: ${title}: ${f.text}`)
       }
     }
   } finally {
@@ -592,6 +714,7 @@ async function deliver($: any): Promise<void> {
 
 /** One delivery attempt; deliver() keeps two from overlapping. */
 async function deliverOnce($: any): Promise<void> {
+  if (halted) return
   const pending = await getPending($)
   if (pending.length === 0) return
   const now = await $.clock.now()
@@ -608,7 +731,7 @@ async function deliverOnce($: any): Promise<void> {
     // Put them back for the next try, which the gap must not hold up
     await $.store.set(pendingKey(), [...pending, ...(await getPending($))])
     lastWakeAt = before
-    $.ui.log(`watch: wake failed: ${err}`)
+    $.ui.log(plain() ? 'watch: wake failed' : `watch: wake failed: ${err}`)
   }
   await status($)
 }
@@ -619,7 +742,7 @@ function boxState(p: Poller): BoxState {
   const at = nextAt.get(p.id)
   return {
     id: p.id,
-    title: p.title,
+    title: plain() ? p.id : p.title,
     everySeconds: p.everySeconds,
     ...(at !== undefined ? { nextAt: at } : {}),
     running: running.has(p.id),
@@ -642,7 +765,7 @@ async function publish($: any): Promise<void> {
     await $.fs.write(wcfg.stateFile, JSON.stringify(stateNow(await $.clock.now())))
     stateError = ''
   } catch (err) {
-    if (String(err) !== stateError) $.ui.log(`watch: state file ${wcfg.stateFile} not written: ${err}`)
+    if (String(err) !== stateError) $.ui.log(plain() ? 'watch: the state file was not written' : `watch: state file ${wcfg.stateFile} not written: ${err}`)
     stateError = String(err)
   }
 }
@@ -686,15 +809,16 @@ function ago(now: number, at: number): string {
 /** /tether-watch's report: each poller's last run, what waits to be told, the config's problems. */
 async function report($: any): Promise<string> {
   const now = await $.clock.now()
-  const lines = [`watch: ${watchConfigFile}, ${wcfg.pollers.length} pollers`]
+  const lines = [plain() ? `watch: ${wcfg.pollers.length} pollers` : `watch: ${watchConfigFile}, ${wcfg.pollers.length} pollers`]
   for (const p of wcfg.pollers) {
     const r = lastRun.get(p.id)
-    const what = !r ? 'not run yet' : r.ok ? `${r.found} found, ${r.told} new, ${ago(now, r.at)}` : `FAILED ${ago(now, r.at)}: ${r.error}`
+    const what = !r ? 'not run yet' : r.ok ? `${r.found} found, ${r.told} new${r.dropped ? `, ${r.dropped} dropped` : ''}, ${ago(now, r.at)}` : `FAILED ${ago(now, r.at)}: ${r.error}`
     lines.push(`- ${p.id} (every ${p.everySeconds}s${p.wake ? '' : ', no wake'}${running.has(p.id) ? ', running' : ''}, next in ${remaining(p, now)}): ${what}`)
   }
   const pending = await getPending($)
   if (pending.length) lines.push(`to tell: ${pending.length} (${busy ? 'a turn is running' : 'next idle moment'})`)
-  for (const p of problems) lines.push(`config: ${p}`)
+  if (plain() && problems.length > 0) lines.push(`config: ${problems.length} problem${problems.length === 1 ? '' : 's'}`)
+  else for (const p of problems) lines.push(`config: ${p}`)
   return lines.join('\n')
 }
 
@@ -734,6 +858,26 @@ async function tick($: any): Promise<void> {
   } catch {}
 }
 
+/** `/tether-watch reload`: reads the config file again and applies it to every part. */
+async function reloadAll($: any): Promise<void> {
+  const wasPlain = plain()
+  await readTetherConfig($)
+  if (plain() !== wasPlain) {
+    // What was read under the other rule is not shown under this one
+    lastProblems = []
+    lastUndecided = []
+    guardNotes.length = 0
+    lastRun.clear()
+  }
+  await checkpointStart($)
+  await guardsStart($)
+  await fleetConfigure($)
+  await loadWatchConfig($, true)
+  await schedule($)
+  await status($)
+  showStatus($)
+}
+
 const watchStart = async ($: any, e: any, next: any): Promise<any> => {
   await loadWatchConfig($, true)
   await getPending($)
@@ -766,10 +910,7 @@ async function* watchStep($: any, e: any, next: any): any {
   return result
 }
 
-const registerWatch: Register = (on, options) => {
-  const path = (options as { configPath?: unknown } | undefined)?.configPath
-  watchConfigFile = typeof path === 'string' && path.trim() !== '' ? path.trim() : WATCH_CONFIG_FILE
-
+const registerWatch: Register = (on) => {
 
   // Only the main loop's turns make the session busy; subagents run beside an idle session.
   on('turn.start', async ($, e, next) => {
@@ -783,6 +924,12 @@ const registerWatch: Register = (on, options) => {
   // `/tether-watch` reports; `run [id]` polls now; `forget [id]` clears the seen-set so findings are new again; `reload` re-reads the config; `pane` opens the pane of boxes.
   on('command.run', { command: WATCH.name }, async ($, e) => {
     const [verb, id] = String((e as any).args ?? '').trim().split(/\s+/)
+    if (verb === 'reload') {
+      // Re-reads the same file (picked once per load of the module), and every part follows it
+      await reloadAll($)
+      return { text: halted ? HALT_TEXT : await report($) }
+    }
+    if (halted) return { text: HALT_TEXT }
     const chosen = (id ? wcfg.pollers.filter(p => p.id === id) : wcfg.pollers)
     if (id && chosen.length === 0) return { text: `watch: no poller "${id}"` }
     if (verb === 'run') {
@@ -792,9 +939,6 @@ const registerWatch: Register = (on, options) => {
       const seen = ((await $.store.get(seenKey())) ?? {}) as Seen
       for (const p of chosen) delete seen[p.id]
       await $.store.set(seenKey(), seen)
-    } else if (verb === 'reload') {
-      await loadWatchConfig($)
-      await schedule($)
     } else if (verb === 'pane') {
       let placed = false
       try {
@@ -838,7 +982,7 @@ let cpLine = ''
 /** Reads the checkpoint section of the config and starts the tick. */
 async function checkpointStart($: any): Promise<void> {
   const { root } = await readTetherConfig($, true)
-  cpCfg = mergeCheckpoint(layered(options, 'checkpoint', root?.checkpoint))
+  cpCfg = halted ? { ...CHECKPOINT_DEFAULTS, enabled: false, injectHandoff: false } : mergeCheckpoint(layered(optionLayer(), 'checkpoint', root?.checkpoint))
   for (const t of cpTimers) t.cancel()
   cpTimers = cpCfg.enabled ? [$.clock.every(cpCfg.tickSeconds * 1000, () => checkpointTick($)) as any] : []
 }
@@ -903,7 +1047,7 @@ async function carryOut($: any, action: Action, problems: string[] | undefined):
   try {
     await $.command.run({ command: 'clear' })
   } catch (err) {
-    $.ui.log(`checkpoint: the clear failed: ${err}`)
+    $.ui.log(plain() ? 'checkpoint: the clear failed' : `checkpoint: the clear failed: ${err}`)
   }
   // The new session's start normally clears the flag before this returns; a flag still set means no clear happened
   if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) === true) {
@@ -915,6 +1059,7 @@ async function carryOut($: any, action: Action, problems: string[] | undefined):
 
 /** After a clear, the new session continues from the handoff (after a second, so the session has settled). */
 async function checkpointAfterClear($: any): Promise<void> {
+  if (halted) return
   if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) !== true) return
   await $.store.set(CHECKPOINT_CONTINUE_KEY, false)
   cpState = initialCycle()
@@ -1195,14 +1340,14 @@ async function runPlan($: any, plan: Plan, now: number): Promise<void> {
   const at = localStamp(now).replace('T', ' ').slice(0, 16)
   if (plan.kind === 'warm') {
     const sent = await sendToAgent($, plan.id, gCfg.keepWarmText)
-    if (!sent.ok) return failedOnce($, plan.id, `keep-warm of ${plan.label} (${plan.id}) failed: ${sent.reason}`)
+    if (!sent.ok) return failedOnce($, plan.id, plain() ? `keep-warm of ${plan.id} failed` : `keep-warm of ${plan.label} (${plan.id}) failed: ${sent.reason}`)
     await updateGuardStore($, s => recordAction(recordDecision(s, plan.id, 'kept-warm', `Tether pinged it (${plan.count})`, at, now), plan.id, { ...NEW_CYCLE, warms: plan.count, warmContext: plan.contextTokens }))
     await reportGuard($, `kept ${plan.label} (${plan.id}) warm (ping ${plan.count}); its background work goes on`, now)
   } else if (plan.kind === 'handover') {
     const sent = await sendToAgent($, plan.id, gCfg.handoverText)
-    if (!sent.ok) return failedOnce($, plan.id, `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`)
+    if (!sent.ok) return failedOnce($, plan.id, plain() ? `handover request to ${plan.id} failed` : `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`)
     await updateGuardStore($, s => recordAction(s, plan.id, { ...NEW_CYCLE, warms: 0, handoverAt: now }))
-    const why = plan.why === 'model' ? `; it runs on ${plan.model ?? 'an unknown model'}, so a ping would wake it on the session's model and write a new cache` : ''
+    const why = plan.why === 'model' ? `; it runs on ${plain() ? 'another model' : plan.model ?? 'an unknown model'}, so a ping would wake it on the session's model and write a new cache` : ''
     await reportGuard($, `asked ${plan.label} (${plan.id}, ${tokens(plan.contextTokens)} context) to hand over and stop${why}; its background tasks are stopped once it has`, now)
   } else if (plan.kind === 'collect') {
     // The plan is a few seconds old: look again before stopping anything, as a finishing task may have woken the agent
@@ -1213,11 +1358,12 @@ async function runPlan($: any, plan: Plan, now: number): Promise<void> {
     const failed = await stopTasks($, tasks)
     if (failed.length > 0) {
       await updateGuardStore($, s => recordAction(s, plan.id, { stopFailedAt: now }))
-      return reportGuard($, `${plan.label} (${plan.id}) handed over but TaskStop failed for ${failed.join('; ')}; stop them yourself, then record it as retired`, now, { id: plan.id })
+      const what = plain() ? `${failed.length} task${failed.length === 1 ? '' : 's'}` : failed.join('; ')
+      return reportGuard($, `${plan.label} (${plan.id}) handed over but TaskStop failed for ${what}; stop them yourself, then record it as retired`, now, { id: plan.id })
     }
     const n = tasks.length
     await updateGuardStore($, s => recordAction(s, plan.id, { tasksStoppedAt: now, stoppedCount: n }))
-    await reportGuard($, `${plan.label} (${plan.id}) handed over; stopped ${n} background task${n === 1 ? '' : 's'} (${tasks.join(', ')}). It is retired once it has settled and waits on nothing else`, now)
+    await reportGuard($, `${plan.label} (${plan.id}) handed over; stopped ${n} background task${n === 1 ? '' : 's'} (${(plain() ? tasks.map(plainId) : tasks).join(', ')}). It is retired once it has settled and waits on nothing else`, now)
   } else if (plan.kind === 'retire') {
     const live = await agentNow($, plan.id)
     if (!live || live.status === 'running' || live.status === 'waiting') return
@@ -1267,7 +1413,7 @@ async function guardTick($: any): Promise<void> {
       }
       const auto = { handoverTokens: gCfg.handoverTokens, handoverWaitMinutes: gCfg.handoverWaitMinutes, keepWarmMax: gCfg.keepWarmMax, ...(sessionModel ? { sessionModel } : {}) }
       const plans = planActions(seen, store, agentRules(), auto, now)
-      const safely = (plan: Plan) => runPlan($, plan, now).catch(err => failedOnce($, plan.id, `${plan.kind} of ${plan.label} (${plan.id}) failed: ${err}`))
+      const safely = (plan: Plan) => runPlan($, plan, now).catch(err => failedOnce($, plan.id, plain() ? `${plan.kind} of ${plan.id} failed` : `${plan.kind} of ${plan.label} (${plan.id}) failed: ${err}`))
       await Promise.all(plans.filter(x => x.kind === 'warm' || x.kind === 'handover').map(safely))
       for (const plan of plans.filter(x => x.kind !== 'warm' && x.kind !== 'handover')) await safely(plan)
     }
@@ -1275,7 +1421,7 @@ async function guardTick($: any): Promise<void> {
     refreshMarks(store)
     lastUndecided = undecided(seen, store, agentRules(), now)
   } catch (err) {
-    failedOnce($, '*', `the tick failed: ${err}`)
+    failedOnce($, '*', plain() ? 'the tick failed' : `the tick failed: ${err}`)
   } finally {
     // A zombie tick (stuck past the limit, since taken over) must not clear the flag of the tick that owns it now
     if (guardTickStart === started) guardTicking = false
@@ -1290,7 +1436,7 @@ async function unpushedIn($: any, p: PrsPoller, heads: Map<number, { branch: str
     if (!(await $.fs.exists(wt))) continue
     if (p.busyMarker && (await $.fs.exists(`${wt}/${p.busyMarker}`))) continue
     const git = async (...args: string[]): Promise<string> => {
-      const r = await $.process.run(['git', '-C', wt, ...args], { timeoutMs: 30_000 })
+      const r = await runChecked($, ['git', '-C', wt, ...args], { timeoutMs: 30_000 })
       return r.exitCode === 0 ? String(r.stdout).trim() : ''
     }
     if ((await git('rev-parse', '--abbrev-ref', 'HEAD')) !== h.branch) continue
@@ -1302,10 +1448,11 @@ async function unpushedIn($: any, p: PrsPoller, heads: Map<number, { branch: str
 
 /** One run of a `prs` poller: the problems with no owner, as findings; the Stop hook gets all problems. */
 async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]; error?: string }> {
-  const run = (command: string[], timeoutMs: number) => $.process.run(command, { timeoutMs, ...(p.cwd ? { cwd: p.cwd } : {}) })
+  const run = (command: string[], timeoutMs: number) => runChecked($, command, { timeoutMs, ...(p.cwd ? { cwd: p.cwd } : {}) })
   try {
     const listed = await run(['gh', 'pr', 'list', '--state', 'open', '--limit', '100', '--json', GH_FIELDS], 60_000)
-    if (listed.exitCode !== 0) return { error: `gh pr list: exit ${listed.exitCode}` }
+    if (listed.refused) return { error: listed.refused }
+    if (listed.exitCode !== 0) return { error: plain() ? `exit ${listed.exitCode}` : `gh pr list: exit ${listed.exitCode}` }
     const list = JSON.parse(listed.stdout) as Array<{ number: number; headRefName: string; headRefOid: string }>
     const heads = new Map(list.map(x => [x.number, { branch: x.headRefName, sha: x.headRefOid }]))
     const now = await $.clock.now()
@@ -1313,7 +1460,8 @@ async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]
     let reruns: ReturnType<typeof rerunsFromHealth> = []
     if (p.command) {
       const r = await run(p.command, p.timeoutMs)
-      if (!p.okExitCodes.includes(r.exitCode)) return { error: `health command: exit ${r.exitCode}` }
+      if (r.refused) return { error: r.refused }
+      if (!p.okExitCodes.includes(r.exitCode)) return { error: plain() ? `exit ${r.exitCode}` : `health command: exit ${r.exitCode}` }
       const data = JSON.parse(r.stdout)
       found = fromHealth(data, heads)
       reruns = rerunsFromHealth(data)
@@ -1322,11 +1470,19 @@ async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]
       found = fromGh(list, { stuckMinutes: p.stuckMinutes, requireAutoMerge: p.requireAutoMerge, ignoreDrafts: p.ignoreDrafts }, now)
     }
     if (p.worktrees) found = [...found, ...(await unpushedIn($, p, heads))]
+    // Under plainOutput a problem keeps its number, a cause code and hashes only (no branch, check name or detail)
+    if (plain()) found = found.map(x => plainProblem(x, hashKey))
     lastProblems = found
     // A rerun the command says it made (or would make) owns that PR's failed checks for `rerunHours`.
     const apply = (s: GuardStore): GuardStore => {
       let recorded = s
-      for (const x of reruns) if (ACTIVE_RERUN.has(x.status)) recorded = recordRerun(recorded, x.number, heads.get(x.number)?.sha ?? '?', x.checks, p.rerunHours, now)
+      for (const x of reruns) {
+        if (!ACTIVE_RERUN.has(x.status)) continue
+        const sha = heads.get(x.number)?.sha ?? '?'
+        recorded = plain()
+          ? recordRerun(recorded, x.number, /^[0-9a-f]{7,64}$/i.test(sha) ? sha : '?', x.checks.map(hashKey), p.rerunHours, now)
+          : recordRerun(recorded, x.number, sha, x.checks, p.rerunHours, now)
+      }
       return pruneOwners(recorded, now)
     }
     // Written under the lock, and only when something changed, so it cannot overwrite a concurrent decision
@@ -1334,7 +1490,7 @@ async function prsFindings($: any, p: PrsPoller): Promise<{ findings?: Finding[]
     const pruned = apply(before) !== before ? await updateGuardStore($, apply) : before
     return { findings: toldProblems(found, pruned, now).map(x => ({ key: problemKey(x), text: problemLine(x) })) }
   } catch (err) {
-    return { error: String(err) }
+    return { error: plain() ? 'bad-output' : String(err) }
   }
 }
 
@@ -1376,7 +1532,7 @@ async function registerGuardTools($: any): Promise<void> {
       },
     })
   } catch (err) {
-    $.ui.log(`guards: the tools were not registered: ${err}`)
+    $.ui.log(plain() ? 'guards: the tools were not registered' : `guards: the tools were not registered: ${err}`)
   }
 }
 
@@ -1388,12 +1544,22 @@ async function prOwnerCall($: any, e: any): Promise<any> {
   const prsPoller = wcfg.pollers.find((x): x is PrsPoller => x.kind === 'prs')
   const hours = Number(e.hours) > 0 ? Number(e.hours) : e.kind === 'assign' ? (prsPoller?.assignHours ?? 4) : 0
   if (hours <= 0) return { deny: 'a waiver needs hours' }
-  const who = e.kind === 'waive' ? 'waived' : String(e.who ?? '').trim()
-  if (who === '') return { deny: 'an assignment needs who' }
+  const given = e.kind === 'waive' ? 'waived' : String(e.who ?? '').trim()
+  if (given === '') return { deny: 'an assignment needs who' }
   const now = await $.clock.now()
-  const cause = typeof e.cause === 'string' && e.cause.trim() !== '' ? e.cause.trim() : undefined
-  await updateGuardStore($, s => recordOwner(s, pr, who, hours, String(e.note ?? ''), now, localStamp(now).replace('T', ' ').slice(0, 16), cause))
+  const named = typeof e.cause === 'string' && e.cause.trim() !== '' ? e.cause.trim() : undefined
+  // Under plainOutput only an id-like owner and a known cause are kept, and the note is not
+  const who = plain() ? plainId(given) : given
+  const cause = named !== undefined && plain() ? plainCode(named, CAUSES) : named
+  const note = plain() ? '' : String(e.note ?? '')
+  await updateGuardStore($, s => recordOwner(s, pr, who, hours, note, now, localStamp(now).replace('T', ' ').slice(0, 16), cause))
   return toolText(`#${pr} ${e.kind === 'waive' ? 'waived' : 'assigned to ' + who} for ${hours} h${cause ? ` (cause ${cause})` : ''}.`)
+}
+
+/** Why a decision is refused, as a code with a count: the agent runs, has live tasks, or waits on background work. */
+function decisionCode(a: AgentSeen): string {
+  const tasks = a.tasks?.length ?? 0
+  return a.status === 'running' ? 'running' : tasks > 0 ? `live-tasks ${tasks}` : 'waiting'
 }
 
 /**
@@ -1403,7 +1569,7 @@ async function prOwnerCall($: any, e: any): Promise<any> {
 async function agentDecisionCall($: any, e: any): Promise<any> {
   if (typeof e.id !== 'string' || e.id.trim() === '') return { deny: 'id must be an agent id' }
   if (e.decision !== 'retired' && e.decision !== 'done' && e.decision !== 'kept-warm') return { deny: 'decision must be "kept-warm", "retired" or "done"' }
-  const id = e.id.trim()
+  const id = plain() ? plainId(e.id.trim()) : e.id.trim()
   const now = await $.clock.now()
   let known: AgentSeen | undefined
   try {
@@ -1412,10 +1578,10 @@ async function agentDecisionCall($: any, e: any): Promise<any> {
     // Without the engine's list nothing can be checked; the decision is recorded as given
   }
   const problem = decisionProblem(e.decision, known)
-  if (problem) return { deny: `agent_decision refused: ${problem}` }
+  if (problem) return { deny: plain() ? `agent_decision refused: ${known!.id} ${decisionCode(known!)}; TaskStop it first, then record it as ${e.decision}.` : `agent_decision refused: ${problem}` }
   const key = known?.id ?? id
   await updateGuardStore($, s => {
-    const recorded = recordDecision(s, key, e.decision, String(e.note ?? ''), localStamp(now).replace('T', ' ').slice(0, 16), now)
+    const recorded = recordDecision(s, key, e.decision, plain() ? '' : String(e.note ?? ''), localStamp(now).replace('T', ' ').slice(0, 16), now)
     // Kept-warm is a new cycle: an earlier handover (late, or failed) no longer applies to an agent that goes on working
     return e.decision === 'kept-warm' ? recordAction(recorded, key, { ...NEW_CYCLE, warms: (s.actions[key]?.warms ?? 0) + 1, ...(known?.contextTokens !== undefined ? { warmContext: known.contextTokens } : {}) }) : recorded
   })
@@ -1425,15 +1591,19 @@ async function agentDecisionCall($: any, e: any): Promise<any> {
 
 /** What /tether-guards prints: the PR problems nobody owns, the owners and waivers, the agents awaiting a decision. */
 async function guardsReport($: any): Promise<string> {
+  if (halted) return HALT_TEXT
   const now = await $.clock.now()
   const store = await guardStore($)
   const open = unowned(lastProblems, store, now)
   const real = lastProblems.filter(p => !p.info)
   const lines = [`guards: ${real.length} PR problem${real.length === 1 ? '' : 's'} at the last poll, ${open.length} without an owner`]
-  for (const p of open) lines.push(`- #${p.number} ${p.branch}: ${p.text}`)
-  for (const p of lastProblems.filter(x => x.info)) lines.push(`info: #${p.number} ${p.branch}: ${p.text}`)
+  for (const p of open) lines.push(`- ${problemLine(p)}`)
+  for (const p of lastProblems.filter(x => x.info)) lines.push(`info: ${problemLine(p)}`)
   for (const [pr, o] of Object.entries(store.owners)) {
-    if (o.until > now) lines.push(`owner #${pr}: ${o.who}${o.cause ? ` (${o.cause})` : ''} for ${Math.round((o.until - now) / 3_600_000)} h more, ${o.note}`)
+    if (o.until <= now) continue
+    const hoursLeft = Math.round((o.until - now) / 3_600_000)
+    if (plain()) lines.push(`owner #${Number(pr) || '?'}: ${plainId(o.who)}${o.cause ? ` (${plainCode(o.cause, CAUSES)})` : ''} for ${hoursLeft} h more`)
+    else lines.push(`owner #${pr}: ${o.who}${o.cause ? ` (${o.cause})` : ''} for ${hoursLeft} h more, ${o.note}`)
   }
   lines.push(`agents awaiting a decision: ${lastUndecided.length}`)
   for (const u of lastUndecided) lines.push(`- ${u.text}`)
@@ -1456,12 +1626,21 @@ let lastLogError = ''
 /** Reads the guards', housekeeping and conversation settings. */
 async function guardsStart($: any): Promise<void> {
   const { root } = await readTetherConfig($, true)
-  hkCfg = mergeHousekeeping(layered(options, 'housekeeping', root?.housekeeping))
-  convCfg = mergeConversations(layered(options, 'conversations', root?.conversations))
-  stopCfg = mergeStop(layered(options, 'stop', root?.stop))
-  gCfg = mergeCacheGuard(layered(options, 'cacheGuard', root?.cacheGuard))
-  // The guard acts on its own clock, whether or not a poller is configured
+  hkCfg = mergeHousekeeping(layered(optionLayer(), 'housekeeping', root?.housekeeping))
+  convCfg = mergeConversations(layered(optionLayer(), 'conversations', root?.conversations))
+  stopCfg = mergeStop(layered(optionLayer(), 'stop', root?.stop))
+  gCfg = mergeCacheGuard(layered(optionLayer(), 'cacheGuard', root?.cacheGuard))
   guardTimer?.cancel()
+  guardTimer = undefined
+  if (halted) {
+    // Failed closed: no guard, no housekeeping, no logs
+    hkCfg = { ...HOUSEKEEPING_DEFAULTS, enabled: false }
+    convCfg = { ...CONVERSATIONS_DEFAULTS, enabled: false }
+    stopCfg = { ...STOP_DEFAULTS, enabled: false }
+    gCfg = { ...CACHE_GUARD_DEFAULTS, auto: false }
+    return
+  }
+  // The guard acts on its own clock, whether or not a poller is configured
   guardTimer = $.clock.every(60_000, () => guardTick($)) as any
 }
 
@@ -1470,11 +1649,13 @@ async function handoffContext($: any): Promise<string | undefined> {
   try {
     // Read again: this event may come before the session.start that loads the settings
     const { root } = await readTetherConfig($, true)
-    const cfg = mergeCheckpoint(layered(options, 'checkpoint', root?.checkpoint))
+    // Failed closed, or plainOutput: the handoff's text is not put in the session
+    if (halted || plain()) return undefined
+    const cfg = mergeCheckpoint(layered(optionLayer(), 'checkpoint', root?.checkpoint))
     if (!cfg.injectHandoff || !(await $.fs.exists(cfg.handoffFile))) return undefined
     return injectedHandoff(cfg.handoffFile, String(await $.fs.read(cfg.handoffFile)))
   } catch (err) {
-    $.ui.log(`checkpoint: the handoff was not added to the session: ${err}`)
+    $.ui.log(plain() ? 'checkpoint: the handoff was not added to the session' : `checkpoint: the handoff was not added to the session: ${err}`)
     return undefined
   }
 }
@@ -1483,7 +1664,7 @@ async function handoffContext($: any): Promise<string | undefined> {
 async function housekeepingStart($: any): Promise<void> {
   if (!hkCfg.enabled) return
   try {
-    const where = await $.process.run(['git', 'rev-parse', '--git-path', 'info/exclude'], { timeoutMs: 10_000 })
+    const where = await runChecked($, ['git', 'rev-parse', '--git-path', 'info/exclude'], { timeoutMs: 10_000 })
     if (where.exitCode === 0) {
       const path = String(where.stdout).trim()
       const existing = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
@@ -1500,7 +1681,7 @@ async function housekeepingStart($: any): Promise<void> {
       $.ui.log(`housekeeping: ${cpCfg.handoffFile} fails its check: ${problems.join('; ')}`)
     }
   } catch (err) {
-    $.ui.log(`housekeeping: ${err}`)
+    $.ui.log(plain() ? 'housekeeping: failed' : `housekeeping: ${err}`)
   }
 }
 
@@ -1527,7 +1708,7 @@ async function writeLog($: any, force = false): Promise<void> {
     await $.fs.write(`${hkCfg.folder}/conversations/${logName(started as string, id)}`, renderConversation(messages, { sessionId: id, startedAt: (started as string).replace('T', ' ').slice(0, 16) }))
     lastLogError = ''
   } catch (err) {
-    if (String(err) !== lastLogError) $.ui.log(`conversations: the log was not written: ${err}`)
+    if (String(err) !== lastLogError) $.ui.log(plain() ? 'conversations: the log was not written' : `conversations: the log was not written: ${err}`)
     lastLogError = String(err)
   }
 }
@@ -1541,7 +1722,7 @@ export const register: Register = (on, opts) => {
     await checkpointStart($)
     await guardsStart($)
     await housekeepingStart($)
-    await registerGuardTools($)
+    if (!halted) await registerGuardTools($)
     try {
       await $.command.register({ ...registration(GUARDS), immediate: true })
     } catch {}
@@ -1552,7 +1733,7 @@ export const register: Register = (on, opts) => {
   on('session.append', async ($, e, next) => {
     const r = await next(e)
     try {
-      await noteRow($, e)
+      if (!halted) await noteRow($, e)
     } catch {
       // Only the task list is lost
     }
@@ -1560,8 +1741,8 @@ export const register: Register = (on, opts) => {
   })
 
   // The model records an owner, a waiver or a decision with these tools.
-  on('tool.call', { tool: `mcp__tether__${TOOL_PR}` }, async ($, e) => prOwnerCall($, e))
-  on('tool.call', { tool: `mcp__tether__${TOOL_AGENT}` }, async ($, e) => agentDecisionCall($, e))
+  on('tool.call', { tool: `mcp__tether__${TOOL_PR}` }, async ($, e) => (halted ? { deny: HALT_TEXT } : prOwnerCall($, e)))
+  on('tool.call', { tool: `mcp__tether__${TOOL_AGENT}` }, async ($, e) => (halted ? { deny: HALT_TEXT } : agentDecisionCall($, e)))
   on('command.run', { command: GUARDS.name }, async ($) => ({ text: await guardsReport($) }))
 
   // The end of a turn is blocked while a PR problem or a stopped big agent has no owner or decision, at most

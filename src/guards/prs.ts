@@ -2,6 +2,7 @@
 // told. A problem is keyed PR + cause + head commit, so a new push is a new problem. The reading of GitHub
 // and of the worktrees is in hooks/register.tsx; this file only turns what was read into problems.
 
+import { plainCode } from '../options/plain'
 import { ownerCovers, rerunCovers, type GuardStore } from './store'
 
 /** One problem with an open PR. */
@@ -28,7 +29,7 @@ export function problemKey(p: Problem): string {
 
 /** The line a problem is told as. */
 export function problemLine(p: Problem): string {
-  return `#${p.number} ${p.branch}: ${p.text}`
+  return p.branch === '' ? `#${p.number}: ${p.text}` : `#${p.number} ${p.branch}: ${p.text}`
 }
 
 /** What the built-in GitHub read asks `gh pr list` for. */
@@ -173,6 +174,33 @@ export function unowned(problems: Problem[], store: GuardStore, now: number): Pr
 /** What a poll tells: the unowned problems and the information lines, sorted by PR then text. */
 export function toldProblems(problems: Problem[], store: GuardStore, now: number): Problem[] {
   return [...unowned(problems, store, now), ...problems.filter(p => p.info)].sort((a, b) => a.number - b.number || a.text.localeCompare(b.text))
+}
+
+/** The causes Tether names under plainOutput; a project's own cause is told as `other`. */
+export const CAUSES: ReadonlySet<string> = new Set([
+  'conflict', 'checks-failed', 'ci-stuck', 'auto-merge-off', 'unpushed',
+  'rerun-would-rerun', 'rerun-reran', 'rerun-refused', 'rerun-capped', 'rerun-new-event',
+])
+
+/**
+ * A problem as kept and told under plainOutput: its number, a cause from CAUSES (else `other`), a head that is a
+ * hex sha (else `?`), and no branch, check name or detail; the failed checks are kept as hashes (so a rerun
+ * recorded with `hash` still matches) and told as a count.
+ */
+export function plainProblem(p: Problem, hash: (s: string) => string): Problem {
+  const cause = plainCode(p.cause, CAUSES)
+  const checks = p.extra === '' ? [] : p.extra.split(',')
+  const text = cause === 'checks-failed' && checks.length > 0 ? `checks-failed (${checks.length} checks)` : cause
+  return {
+    number: p.number,
+    branch: '',
+    cause,
+    text,
+    sha: /^[0-9a-f]{7,64}$/i.test(p.sha) ? p.sha : '?',
+    // Each failed check hashed alone, so a rerun recorded with the same hashes still covers a subset
+    extra: p.cause === 'checks-failed' ? checks.map(hash).join(',') : p.extra === '' ? '' : hash(p.extra),
+    ...(p.info ? { info: true as const } : {}),
+  }
 }
 
 /** How a model is told to deal with problems nobody owns. */
