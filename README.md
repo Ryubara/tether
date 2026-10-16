@@ -12,7 +12,7 @@ run inside Claude Code (version 2.1.287 or later). See the
 - **Fleet.** An agents pane and a status line: each subagent's state, context size, idle time and
   prompt-cache minutes left, with flags that say what waking it would cost. The `SendMessage` guard refuses
   to wake an agent that has a recorded decision, and a big agent whose prompt cache has expired (waking it
-  re-writes the whole context into the cache), for the main agent and for subagents (see the agent guard rule). `/tether-fleet` opens the pane; `/tether-fleet text` prints it.
+  re-writes the whole context into the cache), for the main agent and for subagents (see the agent guard rule). `/tether-fleet` opens the pane (`fleet.openOnStart` opens it at every session start); `/tether-fleet text` prints it.
   **BIG-WAIT**: with `fleet.bigWaitTokens` set (0, the default, is off), a live agent whose context has reached
   it and whose annotation note (`fleet.annotate`) matches `fleet.bigWaitNote` (a regular expression, matched
   case-insensitively; empty: any note, but an agent with no note never matches) shows `BIG-WAIT` in the FLAGS
@@ -24,7 +24,8 @@ run inside Claude Code (version 2.1.287 or later). See the
 - **Watch.** Pollers that run inside the session: each finding is told once, and a model turn starts only for
   new findings, never during a turn or while you type. `/tether-watch` only reports (it never stops polling);
   `/tether-watch pane` shows a box per poller with its countdown and its findings; `/tether-watch run`, `forget` and
-  `reload` poll now, tell findings again and re-read the config.
+  `reload` poll now, tell findings again and re-read the config. `watch.openOnStart` opens the pane at every session
+  start.
 - **Commands.** `/tether-fleet` (pane; `text` prints it), `/tether-watch` (pane; `run`, `forget`, `reload`) and
   `/tether-guards` (text). Pane commands say `(PANE)` in the command list. The names are prefixed with `tether-`
   because the plugin API takes only letters, digits, `_` and `-` in a command name (no `:`).
@@ -185,6 +186,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `fleetEmoji` | `true` | An emoji per state and flag in the pane and /tether-fleet text; off for plain text. |
 | `fleetColumnTint` | (empty) | true bands alternate columns with the theme colour, false divides columns with a bar, or give a colour. Empty: true. |
 | `fleetWatchState` | (empty) | A state file watch writes; when set the pane draws watch boxes under the table. Empty: none. |
+| `fleetOpenOnStart` | `false` | Open the Fleet pane, without taking focus, when a session starts (new, resumed or cleared). |
 | `fleetPaneRows` | `0` | Rows asked for the pane when inline above the prompt. 0: Claude Code decides. |
 | `fleetPaneColumns` | `0` | Columns asked for the pane when docked beside a fullscreen transcript. 0: Claude Code decides. |
 | `watchEnabled` | `true` | The pollers and the findings they wake the model for. |
@@ -195,6 +197,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `watchWakePreamble` | `watch found something new. Handle it or say why it can wait:` | The first line of the wake prompt. |
 | `watchStoreName` | `default` | Names this project seen-set in the store, so two projects keep their own. |
 | `watchStateFile` | (empty) | A file watch writes the boxes data to, for fleet to draw. Empty: none. |
+| `watchOpenOnStart` | `false` | Open the Watch pane, without taking focus, when a session starts (new, resumed or cleared). |
 | `watchPaneRows` | `0` | Rows asked for the pane when inline above the prompt. 0: Claude Code decides. |
 | `watchPaneColumns` | `0` | Columns asked for the pane when docked beside a fullscreen transcript. 0: Claude Code decides. |
 | `housekeepingEnabled` | `true` | Tether folder, exclude lines, handoff template and handoff checks. |

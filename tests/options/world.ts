@@ -25,6 +25,8 @@ export type World = {
   toasts: string[]
   logs: string[]
   statuses: string[]
+  /** Every pane Tether asked ui.open for. */
+  opened: Array<Record<string, unknown>>
   /** What fs.write wrote, by path. */
   writes: Record<string, string>
   /** The store, and every value written to it (key and JSON). */
@@ -53,6 +55,7 @@ export function world(over: Partial<World> = {}): World {
     toasts: [],
     logs: [],
     statuses: [],
+    opened: [],
     writes: {},
     store: new Map(),
     storeWrites: [],
@@ -130,7 +133,10 @@ export async function start($: any, on: any, w: World) {
     return { value: undefined }
   })
   on('ui.invalidate', () => ({ value: undefined }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', ($: any, e: any) => {
+    w.opened.push(e)
+    return { value: { isPlaced: true } }
+  })
   on('ui.panes', () => ({ value: [] }))
   on('classic.Stop', () => ({}))
   on('classic.SessionStart', () => ({}))

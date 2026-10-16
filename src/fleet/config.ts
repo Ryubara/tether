@@ -42,6 +42,8 @@ export type FleetConfig = {
    * (name, live countdown, findings) under the agent table. Empty: none.
    */
   watchState: string
+  /** Open the pane, without focus, when a session starts (new, resumed or cleared). */
+  openOnStart: boolean
   /** The pane size asked for: `rows` when inline above the prompt, `columns` when docked beside a fullscreen transcript. */
   pane: { rows?: number; columns?: number }
   /** Seconds between refreshes of the agent list, usage and annotations. */
@@ -71,6 +73,7 @@ export const DEFAULTS: FleetConfig = {
   columnTint: true,
   watchState: '',
   cacheWarnMinutes: 15,
+  openOnStart: false,
   pane: {},
 }
 
@@ -88,6 +91,7 @@ export function mergeConfig(raw: unknown): FleetConfig {
   if (typeof r.bigWaitNote === 'string') out.bigWaitNote = r.bigWaitNote.trim()
   if (typeof r.watchState === 'string') out.watchState = r.watchState.trim()
   if (typeof r.emoji === 'boolean') out.emoji = r.emoji
+  if (typeof r.openOnStart === 'boolean') out.openOnStart = r.openOnStart
   if (typeof r.columnTint === 'boolean' || (typeof r.columnTint === 'string' && r.columnTint.trim() !== '')) {
     out.columnTint = typeof r.columnTint === 'string' ? r.columnTint.trim() : r.columnTint
   }
