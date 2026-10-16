@@ -50,8 +50,8 @@ export const OPTIONS: Entry[] = [
   { option: 'fleetCacheWarnMinutes', section: 'fleet', field: 'cacheWarnMinutes', kind: 'number', title: 'Cache warning (minutes left)', description: 'Cache minutes left at or under which the cache cell turns to the warning colour.', default: 15 },
   { option: 'fleetEmoji', section: 'fleet', field: 'emoji', kind: 'boolean', title: 'Emoji in the pane', description: 'An emoji per state and flag in the pane and /tether-fleet text; off for plain text.', default: true },
   { option: 'fleetColumnTint', section: 'fleet', field: 'columnTint', kind: 'string', title: 'Column tint', description: 'true bands alternate columns with the theme colour, false divides columns with a bar, or give a colour. Empty: true.', default: '' },
-  { option: 'fleetWatchState', section: 'fleet', field: 'watchState', kind: 'string', title: 'Watch state file shown in the pane', description: 'A state file watch writes; when set the pane draws watch boxes under the table. Empty: none.', default: '' },
-  { option: 'fleetOpenOnStart', section: 'fleet', field: 'openOnStart', kind: 'boolean', title: 'Open the Fleet pane at start', description: 'Open the Fleet pane, without taking focus, when a session starts (new, resumed or cleared).', default: false },
+  { option: 'fleetWatchState', section: 'fleet', field: 'watchState', kind: 'string', title: 'Watch state file shown in the pane', description: 'A state file the watch of another session writes; when set and this session runs no poller of its own, the Tether pane draws its boxes under the table. Empty: none.', default: '' },
+  { option: 'fleetOpenOnStart', section: 'fleet', field: 'openOnStart', kind: 'boolean', title: 'Open the Tether pane at start (fleet)', description: 'Open the Tether pane (the Fleet table, the Watch boxes under it), without taking focus, when a session starts or is cleared, while fleet is on.', default: false },
   { option: 'watchEnabled', section: 'watch', field: 'enabled', kind: 'boolean', title: 'Watch on', description: 'The pollers and the findings they wake the model for.', default: true },
   { option: 'watchMinWakeGapSeconds', section: 'watch', field: 'minWakeGapSeconds', kind: 'number', title: 'Seconds between wakes', description: 'At least this long between two wakes; findings in between join the next one.', default: 60 },
   { option: 'watchDeferWhileTypingMinutes', section: 'watch', field: 'deferWhileTypingMinutes', kind: 'number', title: 'Defer wake while typing (minutes)', description: 'While you have a draft, a wake waits up to this long, then goes anyway.', default: 10 },
@@ -60,7 +60,7 @@ export const OPTIONS: Entry[] = [
   { option: 'watchWakePreamble', section: 'watch', field: 'wakePreamble', kind: 'string', title: 'Wake message first line', description: 'The first line of the wake prompt.', default: 'watch found something new. Handle it or say why it can wait:' },
   { option: 'watchStoreName', section: 'watch', field: 'storeName', kind: 'string', title: 'Watch store name', description: 'Names this project seen-set in the store, so two projects keep their own.', default: 'default' },
   { option: 'watchStateFile', section: 'watch', field: 'stateFile', kind: 'string', title: 'Watch state file', description: 'A file watch writes the boxes data to, for fleet to draw. Empty: none.', default: '' },
-  { option: 'watchOpenOnStart', section: 'watch', field: 'openOnStart', kind: 'boolean', title: 'Open the Watch pane at start', description: 'Open the Watch pane, without taking focus, when a session starts (new, resumed or cleared).', default: false },
+  { option: 'watchOpenOnStart', section: 'watch', field: 'openOnStart', kind: 'boolean', title: 'Open the Tether pane at start (watch)', description: 'Open the Tether pane, without taking focus, when a session starts or is cleared, while watch is on. Either option opens it once.', default: false },
   { option: 'housekeepingEnabled', section: 'housekeeping', field: 'enabled', kind: 'boolean', title: 'Housekeeping on', description: 'Tether folder, exclude lines, handoff template and handoff checks.', default: true },
   { option: 'housekeepingFolder', section: 'housekeeping', field: 'folder', kind: 'string', title: 'Tether folder', description: 'Tether folder in the project (conversation logs live in its conversations folder).', default: '.tether' },
   { option: 'housekeepingCreateHandoff', section: 'housekeeping', field: 'createHandoff', kind: 'boolean', title: 'Create a missing handoff', description: 'Create the handoff from the template when it is missing.', default: true },
@@ -81,10 +81,10 @@ export const OPTIONS: Entry[] = [
 
 /** The pane size options, which feed a nested `pane` object (fleet and watch each have one); 0 means not set. */
 export const PANES: Array<Omit<Entry, 'section' | 'kind'> & { section: 'fleet' | 'watch'; field: 'rows' | 'columns' }> = [
-  { option: 'fleetPaneRows', section: 'fleet', field: 'rows', title: 'Fleet pane rows', description: 'Rows asked for the pane when inline above the prompt. 0: Claude Code decides.', default: 0 },
-  { option: 'fleetPaneColumns', section: 'fleet', field: 'columns', title: 'Fleet pane columns', description: 'Columns asked for the pane when docked beside a fullscreen transcript. 0: Claude Code decides.', default: 0 },
-  { option: 'watchPaneRows', section: 'watch', field: 'rows', title: 'Watch pane rows', description: 'Rows asked for the pane when inline above the prompt. 0: Claude Code decides.', default: 0 },
-  { option: 'watchPaneColumns', section: 'watch', field: 'columns', title: 'Watch pane columns', description: 'Columns asked for the pane when docked beside a fullscreen transcript. 0: Claude Code decides.', default: 0 },
+  { option: 'fleetPaneRows', section: 'fleet', field: 'rows', title: 'Tether pane rows', description: 'Rows asked for the Tether pane when inline above the prompt. 0: Claude Code decides.', default: 0 },
+  { option: 'fleetPaneColumns', section: 'fleet', field: 'columns', title: 'Tether pane columns', description: 'Columns asked for the Tether pane when docked beside a fullscreen transcript. 0: Claude Code decides.', default: 0 },
+  { option: 'watchPaneRows', section: 'watch', field: 'rows', title: 'Tether pane rows (watch)', description: 'Rows for the Tether pane when fleet.pane sets none (kept for configs written for a separate Watch pane). 0: not set.', default: 0 },
+  { option: 'watchPaneColumns', section: 'watch', field: 'columns', title: 'Tether pane columns (watch)', description: 'Columns for the Tether pane when fleet.pane sets none (kept for configs written for a separate Watch pane). 0: not set.', default: 0 },
 ]
 
 /** `fleet.columnTint` takes true, false or a colour; the form holds text, so "true" and "false" are read as booleans. */

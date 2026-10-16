@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.27",
+  "version": "1.0.0-alpha.28",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -164,25 +164,25 @@
     "fleetWatchState": {
       "type": "string",
       "title": "Watch state file shown in the pane",
-      "description": "A state file watch writes; when set the pane draws watch boxes under the table. Empty: none.",
+      "description": "A state file the watch of another session writes; when set and this session runs no poller of its own, the Tether pane draws its boxes under the table. Empty: none.",
       "default": ""
     },
     "fleetOpenOnStart": {
       "type": "boolean",
-      "title": "Open the Fleet pane at start",
-      "description": "Open the Fleet pane, without taking focus, when a session starts (new, resumed or cleared).",
+      "title": "Open the Tether pane at start (fleet)",
+      "description": "Open the Tether pane (the Fleet table, the Watch boxes under it), without taking focus, when a session starts or is cleared, while fleet is on.",
       "default": false
     },
     "fleetPaneRows": {
       "type": "number",
-      "title": "Fleet pane rows",
-      "description": "Rows asked for the pane when inline above the prompt. 0: Claude Code decides.",
+      "title": "Tether pane rows",
+      "description": "Rows asked for the Tether pane when inline above the prompt. 0: Claude Code decides.",
       "default": 0
     },
     "fleetPaneColumns": {
       "type": "number",
-      "title": "Fleet pane columns",
-      "description": "Columns asked for the pane when docked beside a fullscreen transcript. 0: Claude Code decides.",
+      "title": "Tether pane columns",
+      "description": "Columns asked for the Tether pane when docked beside a fullscreen transcript. 0: Claude Code decides.",
       "default": 0
     },
     "watchEnabled": {
@@ -235,20 +235,20 @@
     },
     "watchOpenOnStart": {
       "type": "boolean",
-      "title": "Open the Watch pane at start",
-      "description": "Open the Watch pane, without taking focus, when a session starts (new, resumed or cleared).",
+      "title": "Open the Tether pane at start (watch)",
+      "description": "Open the Tether pane, without taking focus, when a session starts or is cleared, while watch is on. Either option opens it once.",
       "default": false
     },
     "watchPaneRows": {
       "type": "number",
-      "title": "Watch pane rows",
-      "description": "Rows asked for the pane when inline above the prompt. 0: Claude Code decides.",
+      "title": "Tether pane rows (watch)",
+      "description": "Rows for the Tether pane when fleet.pane sets none (kept for configs written for a separate Watch pane). 0: not set.",
       "default": 0
     },
     "watchPaneColumns": {
       "type": "number",
-      "title": "Watch pane columns",
-      "description": "Columns asked for the pane when docked beside a fullscreen transcript. 0: Claude Code decides.",
+      "title": "Tether pane columns (watch)",
+      "description": "Columns for the Tether pane when fleet.pane sets none (kept for configs written for a separate Watch pane). 0: not set.",
       "default": 0
     },
     "housekeepingEnabled": {

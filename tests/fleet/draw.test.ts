@@ -9,7 +9,7 @@ const AGENTS = [
 
 /** The Pane props a surface hands a docked fleet pane. */
 const PANE_PROPS = {
-  title: 'Fleet',
+  title: 'Tether',
   isFocused: false,
   bodyColumns: 100,
   placement: 'dock',
@@ -55,7 +55,7 @@ test('the pane draws a summary and one row per agent on every pane surface', { t
   await step($, 'a1')
   await clock.advance(61 * MIN)
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'fleet', surface, component: 'Pane', requestId: 'fleet', props: PANE_PROPS as any })
+    const ui = await $.ui.mount({ plugin: 'fleet', surface, component: 'Pane', requestId: 'tether', props: PANE_PROPS as any })
     const all = await texts(ui)
     expect(all[4]?.text).toBe('1 agent (0 running, 1 waiting) · 1 cold')
     expect(all[4]?.props.bold).toBe(true)
@@ -82,7 +82,7 @@ test('the pane draws a summary and one row per agent on every pane surface', { t
 
 test('an empty session says so instead of drawing no rows', { timeoutMs: 30_000 }, async ($, on) => {
   await start($, on, [])
-  const ui = await $.ui.mount({ plugin: 'fleet', surface: 'terminal', component: 'Pane', requestId: 'fleet', props: PANE_PROPS as any })
+  const ui = await $.ui.mount({ plugin: 'fleet', surface: 'terminal', component: 'Pane', requestId: 'tether', props: PANE_PROPS as any })
   expect((await texts(ui)).map(t => t.text)).toEqual(['✅ Fleet   ✅ Watch', '✅ Fleet', '   ', '✅ Watch', '0 agents', 'No agents in this session yet.'])
   await ui.unmount()
 })

@@ -41,7 +41,9 @@ import { logName, renderConversation, type LogMessage } from '../src/conversatio
 
 
 
-const PANE = 'fleet'
+/** Tether's one pane: Fleet's table on top, Watch's poller boxes beneath (each left out while its part is off). */
+const PANE = 'tether'
+const PANE_TITLE = 'Tether'
 /** The config file when neither TETHER_CONFIG nor the `configPath` option names one, relative to the session's working directory. */
 const CONFIG_FILE = DEFAULT_CONFIG_FILE
 /** The config file in use: TETHER_CONFIG, else the `configPath` option, else CONFIG_FILE. */
@@ -184,10 +186,19 @@ async function runChecked($: any, argv: string[], init: Record<string, unknown>)
  * Opens a pane as a session starts (`openOnStart`): beside the panes already open, without taking focus (no
  * `focus`), and without holding the start up. A pane that cannot be placed (a headless session) is left unopened.
  */
-function openAtStart($: any, pane: Record<string, unknown>): void {
-  try {
-    void Promise.resolve($.ui.open({ ...pane, closeOnEscape: true })).catch(() => {})
-  } catch {}
+function openAtStart($: any): void {
+  // Either part's openOnStart opens the one pane, while that part is on
+  const wanted = (cfg.openOnStart && cfg.enabled) || (wcfg.openOnStart && wcfg.enabled)
+  if (!wanted || halted) return
+  openPaneQuietly($)
+}
+
+/**
+ * The pane's id, title and size. One pane, so one size: `fleet.pane`, with `watch.pane` filling in a dimension
+ * `fleet.pane` leaves unset (a config written for the two panes keeps its sizes).
+ */
+function paneSpec(): Record<string, unknown> {
+  return { id: PANE, title: PANE_TITLE, ...wcfg.pane, ...cfg.pane }
 }
 
 /** The fleet settings while halted: off, no guard. */
@@ -214,6 +225,7 @@ async function refresh($: any): Promise<void> {
   } catch {}
   await noteProjectDir($)
   await backfill($)
+  await backfillMain($)
   const now = await $.clock.now()
   fleetStatus = summary(currentRows(now), ledger.get('main')?.contextTokens, limits, coldToday, cfg)
   showStatus($)
@@ -299,6 +311,27 @@ async function backfill($: any): Promise<void> {
   }
 }
 
+/** Set by a clear: the context the engine reports may still be the ended conversation's until a request is made. */
+let mainClearedSinceStart = false
+
+/**
+ * The main session's context while fleet has seen no request of its own (a resumed session, a reload of the
+ * module): the engine's live figure, the one the status line shows. `steps: 0` marks it, so the next real request
+ * replaces it. Not after a clear: that conversation starts empty, and its first request tells the size.
+ */
+async function backfillMain($: any): Promise<void> {
+  if (halted || mainClearedSinceStart) return
+  const l = ledger.get('main')
+  if (l && l.steps > 0) return
+  try {
+    const tokens = (await $.session.usage())?.context?.tokens
+    if (typeof tokens !== 'number' || !(tokens > 0)) return
+    ledger.set('main', { id: 'main', lastStepAt: l?.lastStepAt ?? (await $.clock.now()), contextTokens: tokens, cacheWritten: 0, coldWritten: 0, steps: 0 })
+  } catch {
+    // Without the engine's figure the main context stays unknown until the next request
+  }
+}
+
 /** True while an annotate run is in flight, so a slow adapter never runs twice at once. */
 let annotating = false
 /** The last annotate failure logged, so a broken adapter is reported once, not every minute. */
@@ -355,7 +388,6 @@ const fleetStart = async ($: any, e: any, next: any): Promise<any> => {
   try {
     await $.command.register({ ...registration(FLEET), immediate: true })
   } catch {}
-  if (cfg.openOnStart && cfg.enabled && !halted) openAtStart($, { id: PANE, title: 'Fleet', ...cfg.pane })
   return next(e)
 }
 
@@ -446,7 +478,7 @@ const registerFleet: Register = (on) => {
     let placed = false
     if (!wantsText) {
       try {
-        placed = Boolean((await $.ui.open({ id: PANE, title: 'Fleet', focus: true, closeOnEscape: true, ...cfg.pane }))?.isPlaced)
+        placed = Boolean((await $.ui.open({ ...paneSpec(), focus: true, closeOnEscape: true }))?.isPlaced)
       } catch {}
     }
     // Where no pane can show (headless, or asked for text), answer in the transcript instead.
@@ -462,8 +494,13 @@ const registerFleet: Register = (on) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const now = await $.clock.now()
-    const rows = currentRows(now)
+    // Each part's section only while that part is on
+    const fleetOn = cfg.enabled
+    const rows = fleetOn ? currentRows(now) : []
     const head = summary(rows, ledger.get('main')?.contextTokens, limits, coldToday, cfg)
+    const cols = (e as any).props?.bodyColumns ?? 80
+    // Watch's own pollers, live; else the boxes another session's watch wrote to fleet's watchState file
+    const watchState = wcfg.enabled && wcfg.pollers.length > 0 ? stateNow(now) : undefined
     return (
       <Box flexDirection="column">
         <Text wrap="truncate-end">
@@ -476,10 +513,17 @@ const registerFleet: Register = (on) => {
             {cpLine}
           </Text>
         )}
-        <Text bold wrap="truncate-end">
-          {cfg.enabled ? head : 'Fleet is off (fleet.enabled is false in the config).'}
-        </Text>
-        {rows.length === 0 && (
+        {!fleetOn && !wcfg.enabled && (
+          <Text dimColor wrap="truncate-end">
+            Fleet and Watch are off in the config.
+          </Text>
+        )}
+        {fleetOn && (
+          <Text bold wrap="truncate-end">
+            {head}
+          </Text>
+        )}
+        {fleetOn && rows.length === 0 && (
           <Text dimColor>
             No agents in this session yet.
           </Text>
@@ -505,7 +549,8 @@ const registerFleet: Register = (on) => {
             {legend(rows, cfg)}
           </Text>
         )}
-        {watchBoxes && !plain() && Boxes($.ui.resolve(e), watchBoxes, now, (e as any).props?.bodyColumns ?? 80)}
+        {watchState && WatchBoxes($.ui.resolve(e), watchState, now, cols)}
+        {!watchState && fleetOn && watchBoxes && !plain() && Boxes($.ui.resolve(e), watchBoxes, now, cols)}
       </Box>
     )
   })
@@ -525,8 +570,6 @@ const registerFleet: Register = (on) => {
 const WATCH_CONFIG_FILE = CONFIG_FILE
 /** How often watch checks whether pending findings can be delivered. */
 const DELIVER_MS = 5_000
-/** The pane's id (`/tether-watch pane`). */
-const WATCH_PANE = 'watch'
 /** Log lines kept per poller (the box shows the newest few). */
 const LOG_KEEP = 50
 
@@ -865,7 +908,7 @@ async function schedule($: any): Promise<void> {
 async function tick($: any): Promise<void> {
   await status($)
   try {
-    if ((await $.ui.panes()).some((x: any) => x.id === WATCH_PANE && x.isPlaced)) $.ui.invalidate('ui.render')
+    if ((await $.ui.panes()).some((x: any) => x.id === PANE && x.isPlaced)) $.ui.invalidate('ui.render')
   } catch {}
 }
 
@@ -897,7 +940,6 @@ const watchStart = async ($: any, e: any, next: any): Promise<any> => {
     await $.command.register({ ...registration(WATCH), immediate: true })
   } catch {}
   await status($)
-  if (wcfg.openOnStart && wcfg.enabled && !halted) openAtStart($, { id: WATCH_PANE, title: 'Watch', ...wcfg.pane })
   return next(e)
 }
 
@@ -933,7 +975,7 @@ const registerWatch: Register = (on) => {
 
   // Each subagent request: when it ended and how big the context is, for the agents poller.
 
-  // `/tether-watch` reports; `run [id]` polls now; `forget [id]` clears the seen-set so findings are new again; `reload` re-reads the config; `pane` opens the pane of boxes.
+  // `/tether-watch` reports and opens the Tether pane; `run [id]` polls now; `forget [id]` clears the seen-set so findings are new again; `reload` re-reads the config; `pane` opens and focuses the Tether pane.
   on('command.run', { command: WATCH.name }, async ($, e) => {
     const [verb, id] = String((e as any).args ?? '').trim().split(/\s+/)
     if (verb === 'reload') {
@@ -954,22 +996,24 @@ const registerWatch: Register = (on) => {
     } else if (verb === 'pane') {
       let placed = false
       try {
-        placed = Boolean((await $.ui.open({ id: WATCH_PANE, title: 'Watch', closeOnEscape: true, ...wcfg.pane }))?.isPlaced)
+        placed = Boolean((await $.ui.open({ ...paneSpec(), focus: true, closeOnEscape: true }))?.isPlaced)
       } catch {}
       // Where no pane can show (headless), the report answers instead
       if (placed) return {}
+    } else if (!verb) {
+      // The report, and the Tether pane opened beside it (its boxes sit under Fleet's table)
+      openPaneQuietly($)
     }
     return { text: await report($) }
   })
+  // The boxes are drawn in the Tether pane, under Fleet's table (registerFleet's ui.render).
+}
 
-  // The pane: one box per poller, side by side, each with its countdown and its log.
-  on('ui.render', { component: 'Pane', requestId: WATCH_PANE }, async ($, e) => {
-    const ui = $.ui.resolve(e)
-    const now = await $.clock.now()
-    const state = stateNow(now)
-    if (state.pollers.length === 0) return <ui.Text dimColor>No pollers configured: see the config file.</ui.Text>
-    return WatchBoxes(ui, state, now, (e as any).props?.bodyColumns ?? 80)
-  })
+/** Opens the Tether pane without taking the focus; a pane that cannot be placed is left unopened. */
+function openPaneQuietly($: any): void {
+  try {
+    void Promise.resolve($.ui.open({ ...paneSpec(), closeOnEscape: true })).catch(() => {})
+  } catch {}
 }
 
 // ---- both parts ----
@@ -1009,6 +1053,8 @@ async function checkpointTick($: any): Promise<void> {
     const now = await $.clock.now()
     // A draft is the person typing: it holds the cycle as a wake does (only the main loop's turns count as busy)
     const draft = busy ? '' : ((await $.prompt.read())?.text ?? '')
+    // A resumed session has made no request Tether saw: take the engine's figure until it does
+    if (!((ledger.get('main')?.steps ?? 0) > 0)) await backfillMain($)
     const contextTokens = ledger.get('main')?.contextTokens ?? 0
     // The handoff is read only once a handoff is in progress, the messages from the tick that may ask on: the
     // count at the ask is the baseline later ticks are measured against, so it must be the real one
@@ -1089,6 +1135,20 @@ async function clearNotDone($: any): Promise<void> {
   $.ui.toast('checkpoint: the clear did not happen')
 }
 
+/**
+ * Set by a clear when `injectHandoff` is on: the next prompt carries the handoff as context (no session start, and
+ * so no SessionStart context, follows a clear). A session start that injects it clears this, so it is added once.
+ */
+let injectNext = false
+
+/** Takes the pending injection: the handoff's context text, logged, or undefined when there is none to add. */
+async function takeInjection($: any): Promise<string | undefined> {
+  injectNext = false
+  const text = await handoffContext($)
+  if (text !== undefined) $.ui.log(`checkpoint: added ${cpCfg.handoffFile} to the session`)
+  return text
+}
+
 /** How often, after a clear, Tether looks whether the process runs under the new session's id yet. */
 const NEW_SESSION_POLL_MS = 250
 
@@ -1101,7 +1161,11 @@ const NEW_SESSION_POLL_MS = 250
 async function checkpointAfterClear($: any, endedId: string): Promise<void> {
   cpState = initialCycle()
   ledger.delete('main')
+  mainClearedSinceStart = true
   if (halted) return
+  // No session start follows a clear: reopen the pane here, and add the handoff to the next prompt
+  openAtStart($)
+  injectNext = cpCfg.injectHandoff
   if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) !== true) return
   await $.store.set(CHECKPOINT_CONTINUE_KEY, false)
   const started = await $.clock.now()
@@ -1788,7 +1852,12 @@ export const register: Register = (on, opts) => {
     try {
       await $.command.register({ ...registration(CHECKPOINT), immediate: true })
     } catch {}
-    return fleetStart($, e, (e2: any) => watchStart($, e2, next))
+    const r = await fleetStart($, e, (e2: any) => watchStart($, e2, next))
+    // Once both parts have read their settings: the one pane, when either part asks for it
+    openAtStart($)
+    mainClearedSinceStart = false
+    void backfillMain($)
+    return r
   })
 
   // The background tasks a subagent starts and ends are in the rows appended to its conversation.
@@ -1864,8 +1933,24 @@ export const register: Register = (on, opts) => {
     const r: any = await next(e)
     const text = await handoffContext($)
     if (text === undefined) return r
+    // Added here, so the next prompt does not add it a second time
+    injectNext = false
     $.ui.log(`checkpoint: added ${cpCfg.handoffFile} to the session`)
     return { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), text] }
+  }).catch(($, e, next) => next(e))
+  // After a clear, the first prompt carries the handoff as context. A prompt the person submits passes Tether's
+  // prompt.submit; Tether's own continue does not (a plugin's call runs beneath its own hooks), so the engine's
+  // UserPromptSubmit, raised for every prompt it takes, adds it there. Whichever comes first adds it, once.
+  on('prompt.submit', async ($, e, next) => {
+    if (!injectNext || (e as any).command) return next(e)
+    const text = await takeInjection($)
+    return next(text === undefined ? e : ({ ...e, context: [...((e as any).context ?? []), text] } as any))
+  }).catch(($, e, next) => next(e))
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const r: any = await next(e)
+    if (!injectNext) return r
+    const text = await takeInjection($)
+    return text === undefined ? r : { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), text] }
   }).catch(($, e, next) => next(e))
   on('turn.complete', async ($, e, next) => {
     const r = await fleetComplete($, e, (e2: any) => watchComplete($, e2, next))

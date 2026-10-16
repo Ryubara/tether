@@ -121,8 +121,11 @@ export function describeCycle(state: CycleState, o: Observed, cfg: CheckpointCon
   if (o.busy) return 'checkpoint: handoff requested, waiting for the turn to end'
   if (o.draft !== '') return 'checkpoint: handoff requested, waiting for your draft to be sent or cleared'
   const left = state.quietSince + cfg.quietSeconds * 1000 - o.now
-  const what = state.dirty ? 'updating the handoff' : o.problems && o.problems.length ? 'repairing the handoff' : 'clearing'
-  return `checkpoint: ${what} in ${clock(left)} (quiet)`
+  if (state.dirty) return `checkpoint: updating the handoff in ${clock(left)} (quiet)`
+  // A missing file is asked for again, a failing one repaired; only a passing one is cleared over
+  if (o.problems === undefined) return `checkpoint: waiting for the handoff file (${cfg.handoffFile}), asking again in ${clock(left)} (quiet)`
+  if (o.problems.length > 0) return `checkpoint: repairing the handoff in ${clock(left)} (quiet)`
+  return `checkpoint: clearing in ${clock(left)} (quiet)`
 }
 
 /** The prompt that asks the model to write the handoff, or to update it after new messages. */
