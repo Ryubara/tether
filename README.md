@@ -121,6 +121,13 @@ run inside Claude Code (version 2.1.287 or later). See the
   ("TaskStop it first"): it would wake itself. `kept-warm` quiets the warning for one window and does not stop the
   agent being woken. An undecided big agent is refused a `SendMessage` only once idle for `fleet.cacheTtlMinutes`.
 
+  **Without the tools.** Claude Code serves a mod's registered tools from a loopback port in the session's own
+  process. `cacheGuard.registerTools` false (default true) registers neither `pr_owner` nor `agent_decision`, so the
+  session opens no such port. What is lost: the model cannot record an owner, a waiver or a decision, so the Stop
+  hook never blocks for a PR problem or an undecided agent (it could not be cleared). Everything else stays: the
+  guard's own keep-warm and handover actions, its toasts, log lines and flags, the PR findings it tells, and the
+  `SendMessage` guard (which then sees no recorded decision).
+
   **What the plugin API allows** (Claude Code 2.1.296): `$.session.send({ to: { agentId }, text })` messages a stopped
   or waiting subagent (a finished one is resumed from its transcript) and `$.tool.call({ tool: 'TaskStop', task_id })`
   stops a task, through the permission check, so a project that has not allowed TaskStop may see a prompt. There is no
@@ -213,6 +220,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `conversationsEnabled` | `true` | Write each session to a log under the Tether folder. |
 | `conversationsMinSeconds` | `30` | Seconds between log writes while turns complete; a log is always written before a clear. |
 | `cacheGuardAuto` | `true` | Before a stopped agent with live background work loses its prompt cache, Tether messages it (keep waiting, or hand over) and stops the leftover background tasks after a handover. Off: it only blocks the end of a turn and asks the model. |
+| `cacheGuardRegisterTools` | `true` | Register pr_owner and agent_decision, the tools the model records owners and decisions with (Claude Code serves them from a loopback port in the session). Off: no tool, and the end of a turn is never blocked for a record only they could make. |
 | `cacheGuardLeadMinutes` | `20` | Act this many minutes before the cache expires (at most half the cache lifetime). |
 | `cacheGuardHandoverTokens` | `250000` | A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm, if it runs on the session model (else it is handed over too). |
 | `cacheGuardHandoverWaitMinutes` | `10` | Minutes an agent gets to finish its handover (at most half the lead); later the coordinator is alerted. The agent is never stopped silently. |

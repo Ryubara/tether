@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.26",
+  "version": "1.0.0-alpha.27",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -291,6 +291,12 @@
       "type": "boolean",
       "title": "Agent guard acts by itself",
       "description": "Before a stopped agent with live background work loses its prompt cache, Tether messages it (keep waiting, or hand over) and stops the leftover background tasks after a handover. Off: it only blocks the end of a turn and asks the model.",
+      "default": true
+    },
+    "cacheGuardRegisterTools": {
+      "type": "boolean",
+      "title": "Register the guard tools",
+      "description": "Register pr_owner and agent_decision, the tools the model records owners and decisions with (Claude Code serves them from a loopback port in the session). Off: no tool, and the end of a turn is never blocked for a record only they could make.",
       "default": true
     },
     "cacheGuardLeadMinutes": {

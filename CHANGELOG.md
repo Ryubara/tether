@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0-alpha.27
+
+- Added: `cacheGuard.registerTools` (option `cacheGuardRegisterTools`, default on). Off, Tether registers neither
+  guard tool (`pr_owner`, `agent_decision`), so Claude Code opens no loopback port to serve them, and the Stop hook
+  never blocks for a record only those tools could make; the guard's own actions, findings and flags stay. A wrong
+  type in a locked file fails closed.
+
 ## 1.0.0-alpha.26
 
 - Added: `/tether-checkpoint` starts the checkpoint now, whatever the context size and through a back-off. From

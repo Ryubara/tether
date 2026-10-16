@@ -16,6 +16,12 @@ export type CacheGuardConfig = {
   keepWarmText: string
   /** The handover message. */
   handoverText: string
+  /**
+   * Register the guard tools (pr_owner, agent_decision) the model records owners and decisions with. Claude Code
+   * serves a mod's tools from a loopback port in the session's process; off, no tool is registered, and the end
+   * of a turn is never blocked for a record only those tools could make.
+   */
+  registerTools: boolean
 }
 
 export const CACHE_GUARD_DEFAULTS: CacheGuardConfig = {
@@ -28,6 +34,7 @@ export const CACHE_GUARD_DEFAULTS: CacheGuardConfig = {
   handoverText:
     'Tether cache guard: hand over now. Commit your work, update STATUS.md (tip, done, left, running background jobs and their logs or result files, ' +
     'the next exact command), then stop. Do not start new work.',
+  registerTools: true,
 }
 
 /** A positive finite number from `v`, else `fallback`. */
@@ -41,6 +48,7 @@ export function mergeCacheGuard(raw: unknown): CacheGuardConfig {
   if (raw === null || typeof raw !== 'object') return out
   const r = raw as Record<string, unknown>
   if (typeof r.auto === 'boolean') out.auto = r.auto
+  if (typeof r.registerTools === 'boolean') out.registerTools = r.registerTools
   out.leadMinutes = num(r.leadMinutes, out.leadMinutes)
   out.handoverTokens = num(r.handoverTokens, out.handoverTokens)
   out.handoverWaitMinutes = num(r.handoverWaitMinutes, out.handoverWaitMinutes)

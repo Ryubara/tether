@@ -90,6 +90,15 @@ async function start($: any, on: any, config: unknown, w: World) {
 const CONFLICT = [{ number: 12, headRefName: 'fix-x', headRefOid: 'abc', mergeable: 'CONFLICTING' }]
 const PRS = { watch: { pollers: [{ id: 'prs', kind: 'prs', everySeconds: 300 }] } }
 
+test('without the guard tools (cacheGuard.registerTools false) a PR problem is told but never blocks the Stop hook', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ prs: CONFLICT })
+  const clock = await start($, on, { ...PRS, cacheGuard: { registerTools: false } }, w)
+  await clock.advance(3 * SEC)
+  expect(w.submits.length).toBe(1)
+  const stop: any = await ($ as any).classic.Stop({ stop_hook_active: false })
+  expect(stop.block).toBeUndefined()
+})
+
 test('a PR problem is told, blocks the Stop hook until owned, and an owner ends both', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world({ prs: CONFLICT })
   const clock = await start($, on, PRS, w)
