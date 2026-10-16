@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.0-alpha.25
+
+- Fixed: after the checkpoint's own clear, the new session now gets `Continue from <handoff>.` A clear reaches a
+  plugin as `session.end` with reason `clear`, and no session start follows it, so the continue and the cycle's
+  reset now hang off that event. The continue is sent once the process runs under the new session's id (or after
+  30 seconds), and Tether logs `checkpoint: cleared; continuing from <handoff>` when it sends it.
+- Fixed: the reply to the handoff request no longer makes the checkpoint ask for an update when nothing new
+  arrived. The message count the later ticks compare against was taken as 0 at the ask, so the session's whole
+  history read as new; it is now counted at the ask.
+- Added: a log line, `checkpoint: added <handoff> to the session`, when `checkpoint.injectHandoff` adds the
+  handoff at a session start.
+
 ## 1.0.0-alpha.24
 
 - Fixed: after a `/clear` the checkpoint no longer asks for the handoff at once. Any clear, the checkpoint's or the

@@ -3,7 +3,7 @@
 // returns, and a clear that did not happen waits `retryMinutes` before asking again. Synthetic data only.
 import { expect, test } from 'claude-code/testing'
 
-import { MIN, SEC, start, step, world, type World } from '../options/world'
+import { clearSession, MIN, SEC, start, step, world, type World } from '../options/world'
 
 const HANDOFF = '## Where to look\nx\n## Summary\nx\n## Next steps\nx\n## Open questions\nx\n'
 const CONFIG = JSON.stringify({ checkpoint: { enabled: true, contextTokens: 100_000, quietSeconds: 5, tickSeconds: 1, retryMinutes: 10 } })
@@ -12,9 +12,9 @@ const asks = (w: World) => w.submits.filter(t => t.startsWith('Checkpoint:')).le
 const continues = (w: World) => w.submits.filter(t => t === 'Continue from HANDOFF.md.').length
 
 /** A long session (context over the threshold) with a passing handoff, the clear command answered by `clear`. */
-async function longSession($: any, on: any, clear: () => unknown) {
+async function longSession($: any, on: any, clear: (w: World) => unknown) {
   const w = world({ context: 150_000, files: { '.claude/tether.json': CONFIG, 'HANDOFF.md': HANDOFF } })
-  on('command.run', ($: any, e: any, next: any) => (e.command === 'clear' ? clear() : next(e)))
+  on('command.run', ($: any, e: any, next: any) => (e.command === 'clear' ? clear(w) : next(e)))
   const clock = await start($, on, w)
   await step($, 'main')
   return { w, clock }
@@ -28,7 +28,7 @@ test('a long, quiet session is asked for its handoff (the setup the other tests 
 
 test('after a clear by the person, the new session is not asked at once: the old context is forgotten', { timeoutMs: 30_000 }, async ($, on) => {
   const { w, clock } = await longSession($, on, () => ({}))
-  await ($ as any).classic.SessionStart({ source: 'clear' })
+  await clearSession($, w)
   await clock.advance(30 * SEC)
   expect(asks(w)).toBe(0)
   expect(continues(w)).toBe(0)
@@ -42,7 +42,7 @@ test('a clear by the person while a handoff is asked for starts the cycle over',
   const { w, clock } = await longSession($, on, () => ({}))
   await clock.advance(2 * SEC)
   expect(asks(w)).toBe(1)
-  await ($ as any).classic.SessionStart({ source: 'clear' })
+  await clearSession($, w)
   await clock.advance(60 * SEC)
   expect(asks(w)).toBe(1)
   expect(continues(w)).toBe(0)
@@ -59,7 +59,7 @@ test("Tether's clear continues from the handoff when the new session starts afte
   expect(asks(w)).toBe(1)
   expect(cleared).toBe(true)
   // The new session starts a moment later, not inside the command
-  await ($ as any).classic.SessionStart({ source: 'clear' })
+  await clearSession($, w)
   await clock.advance(60 * SEC)
   expect(continues(w)).toBe(1)
   expect(asks(w)).toBe(1)
@@ -87,4 +87,71 @@ test('a clear command that fails backs off the same way', { timeoutMs: 30_000 },
   await clock.advance(5 * MIN)
   expect(asks(w)).toBe(1)
   expect(continues(w)).toBe(0)
+})
+
+test('a clear that ends the conversation inside the command continues once the new session is in', { timeoutMs: 30_000 }, async ($, on) => {
+  const { w, clock } = await longSession($, on, async (w: World) => {
+    await clearSession($, w)
+    return {}
+  })
+  await clock.advance(10 * SEC)
+  expect(asks(w)).toBe(1)
+  await clock.advance(60 * SEC)
+  expect(continues(w)).toBe(1)
+  expect(w.logs).toContain('checkpoint: cleared; continuing from HANDOFF.md')
+  expect(w.toasts).not.toContain('checkpoint: the clear did not happen')
+})
+
+test('the continue waits until the process runs under the new session id', { timeoutMs: 30_000 }, async ($, on) => {
+  const { w, clock } = await longSession($, on, () => ({}))
+  await clock.advance(10 * SEC)
+  expect(asks(w)).toBe(1)
+  // The conversation ends, but the new id is not in yet
+  await ($ as any).session.end({ reason: 'clear', sessionId: w.sessionId, resume: { id: w.sessionId } })
+  await clock.advance(5 * SEC)
+  expect(continues(w)).toBe(0)
+  w.sessionId = 'abcdef12-0001'
+  await clock.advance(2 * SEC)
+  expect(continues(w)).toBe(1)
+  await clock.advance(60 * SEC)
+  expect(continues(w)).toBe(1)
+})
+
+test('a session end that is not a clear does not continue', { timeoutMs: 30_000 }, async ($, on) => {
+  const { w, clock } = await longSession($, on, () => ({}))
+  await clock.advance(10 * SEC)
+  await ($ as any).session.end({ reason: 'other', sessionId: w.sessionId, resume: { id: w.sessionId } })
+  await clock.advance(60 * SEC)
+  expect(continues(w)).toBe(0)
+})
+
+test('a session with history is cleared after the reply to the ask, not asked to update the handoff', { timeoutMs: 30_000 }, async ($, on) => {
+  let cleared = false
+  const history = [
+    { role: 'user', text: 'first request' },
+    { role: 'assistant', text: 'first answer' },
+    { role: 'user', text: 'second request' },
+    { role: 'assistant', text: 'second answer' },
+  ]
+  const w = world({ context: 150_000, messages: [...history], files: { '.claude/tether.json': CONFIG, 'HANDOFF.md': HANDOFF } })
+  on('command.run', ($: any, e: any, next: any) => {
+    if (e.command !== 'clear') return next(e)
+    cleared = true
+    return {}
+  })
+  const clock = await start($, on, w)
+  await step($, 'main')
+  await clock.advance(2 * SEC)
+  expect(asks(w)).toBe(1)
+  // The ask, then the reply: a tool call (its result a user row with no text) and one closing line
+  w.messages.push(
+    { role: 'user', text: `The tether plugin sent a message:\n${w.submits[0]}` },
+    { role: 'assistant', text: '' },
+    { role: 'user', text: '' },
+    { role: 'assistant', text: 'HANDOFF.md is written.' },
+  )
+  await clock.advance(10 * SEC)
+  expect(w.submits.filter(t => t.includes('Update HANDOFF.md'))).toEqual([])
+  expect(asks(w)).toBe(1)
+  expect(cleared).toBe(true)
 })

@@ -1010,10 +1010,12 @@ async function checkpointTick($: any): Promise<void> {
     // A draft is the person typing: it holds the cycle as a wake does (only the main loop's turns count as busy)
     const draft = busy ? '' : ((await $.prompt.read())?.text ?? '')
     const contextTokens = ledger.get('main')?.contextTokens ?? 0
-    // Messages and the handoff are read only once a handoff is in progress; an idle session needs neither
+    // The handoff is read only once a handoff is in progress, the messages from the tick that may ask on: the
+    // count at the ask is the baseline later ticks are measured against, so it must be the real one
     const inProgress = cpState.phase !== 'idle'
+    const mayAsk = !inProgress && contextTokens >= cpCfg.contextTokens
     // New information: the person's and the main agent's messages, not the cycle's own prompts or their replies
-    const messages = inProgress ? newInformation((await $.session.messages()) as Array<{ role: string; text?: string }>, cpCfg) : 0
+    const messages = inProgress || mayAsk ? newInformation((await $.session.messages()) as Array<{ role: string; text?: string }>, cpCfg) : 0
     const problems = inProgress ? await handoffCheck($) : []
     const observed: Observed = { now, contextTokens, busy, draft, messages, problems }
     const { state, action } = cycleStep(cpState, observed, cpCfg)
@@ -1078,18 +1080,40 @@ async function clearNotDone($: any): Promise<void> {
   $.ui.toast('checkpoint: the clear did not happen')
 }
 
+/** How often, after a clear, Tether looks whether the process runs under the new session's id yet. */
+const NEW_SESSION_POLL_MS = 250
+
 /**
- * After any clear, Tether's or the person's: the cycle starts over and the old session's context size is
- * forgotten (it survives /clear, and would make the new session look due at once). When the clear was the
- * checkpoint's, the new session continues from the handoff (after a second, so the session has settled).
+ * After any clear, Tether's or the person's (`session.end` with reason `clear`: no session start follows it):
+ * the cycle starts over and the old session's context size is forgotten (it survives /clear, and would make the
+ * new session look due at once). When the clear was the checkpoint's, the new session continues from the
+ * handoff once the process runs under the new session's id, and a second later, so the session has settled.
  */
-async function checkpointAfterClear($: any): Promise<void> {
+async function checkpointAfterClear($: any, endedId: string): Promise<void> {
   cpState = initialCycle()
   ledger.delete('main')
   if (halted) return
   if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) !== true) return
   await $.store.set(CHECKPOINT_CONTINUE_KEY, false)
-  $.clock.after(1000, () => $.prompt.submit({ text: continueText(cpCfg) }))
+  const started = await $.clock.now()
+  const submit = async () => {
+    $.ui.log(`checkpoint: cleared; continuing from ${cpCfg.handoffFile}`)
+    await $.prompt.submit({ text: continueText(cpCfg) })
+  }
+  const look = async (): Promise<void> => {
+    let id = endedId
+    try {
+      id = String(await $.session.id())
+    } catch {
+      // An id Tether cannot read counts as the old one, until the wait is over
+    }
+    if (id !== endedId || (await $.clock.now()) - started >= CLEAR_WAIT_MS) {
+      $.clock.after(1000, submit)
+      return
+    }
+    $.clock.after(NEW_SESSION_POLL_MS, look)
+  }
+  await look()
 }
 
 // ---- GUARDS ----
@@ -1816,12 +1840,18 @@ export const register: Register = (on, opts) => {
     await writeLog($, true)
     return next(e)
   }).catch(($, e, next) => next(e))
-  // A clear starts a new session: continue from the handoff if a checkpoint asked for it
+  // A clear ends the conversation, and no session start follows it: continue from the handoff if a checkpoint
+  // asked for it. Looked at before the rest, so a failing hook beneath cannot keep it from happening.
+  on('session.end', async ($, e, next) => {
+    if ((e as any).reason === 'clear') await checkpointAfterClear($, String((e as any).sessionId))
+    return next(e)
+  }).catch(($, e, next) => next(e))
   on('classic.SessionStart', async ($, e, next) => {
-    if ((e as any).source === 'clear') await checkpointAfterClear($)
     const r: any = await next(e)
     const text = await handoffContext($)
-    return text === undefined ? r : { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), text] }
+    if (text === undefined) return r
+    $.ui.log(`checkpoint: added ${cpCfg.handoffFile} to the session`)
+    return { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), text] }
   }).catch(($, e, next) => next(e))
   on('turn.complete', async ($, e, next) => {
     const r = await fleetComplete($, e, (e2: any) => watchComplete($, e2, next))

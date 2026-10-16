@@ -40,6 +40,8 @@ export type World = {
   taskStop: { deny?: string }
   /** The context of every model request. */
   context: number
+  /** The session's id (session.id); a clear gives the process a new one. */
+  sessionId: string
 }
 
 export function world(over: Partial<World> = {}): World {
@@ -64,6 +66,7 @@ export function world(over: Partial<World> = {}): World {
     stopped: [],
     taskStop: {},
     context: 150_000,
+    sessionId: 'abcdef12-0000',
     ...over,
   }
 }
@@ -89,7 +92,7 @@ export async function start($: any, on: any, w: World) {
   on('tool.register', () => ({ value: { tool: 'x' } }))
   on('env.get', ($: any, e: any) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : w.env[e.name] }))
   on('session.cwd', () => ({ value: '/work' }))
-  on('session.id', () => ({ value: 'abcdef12-0000' }))
+  on('session.id', () => ({ value: w.sessionId }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.usage', () => ({ value: { rateLimits: [] } }))
   on('fs.exists', ($: any, e: any) => ({ value: fileOf(w, e.path) !== undefined }))
@@ -140,6 +143,7 @@ export async function start($: any, on: any, w: World) {
   on('ui.panes', () => ({ value: [] }))
   on('classic.Stop', () => ({}))
   on('classic.SessionStart', () => ({}))
+  on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
   on('tool.call', ($: any, e: any) => {
     if (e.tool === 'TaskStop') {
       w.stopped.push(e.task_id)
@@ -154,6 +158,13 @@ export async function start($: any, on: any, w: World) {
   on('turn.complete', ($: any, e: any) => ({ text: e.answer ?? '' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   return clock
+}
+
+/** A /clear as a mod sees it: the conversation ends with reason `clear` and the process takes a new id. */
+export async function clearSession($: any, w: World, newId = 'abcdef12-0001') {
+  const ended = w.sessionId
+  w.sessionId = newId
+  await $.session.end({ reason: 'clear', sessionId: ended, resume: { id: ended } })
 }
 
 /** One model request of an agent, read to its end. */
