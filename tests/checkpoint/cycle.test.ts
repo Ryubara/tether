@@ -193,6 +193,15 @@ test('the pane line counts down the quiet window, and says what waits', () => {
   expect(describeCycle(initialCycle(), obs(0, { contextTokens: 5000 }), { ...cfg, enabled: false })).toBe('checkpoint: off')
 })
 
+test('the pane line says clearing only over a handoff that passes: a missing one is waited for, a failing one repaired', () => {
+  const asked = step(initialCycle(), obs(0), cfg).state
+  expect(describeCycle(asked, obs(3000, { problems: undefined }), cfg)).toBe(`checkpoint: waiting for the handoff file (${cfg.handoffFile}), asking again in 0:07 (quiet)`)
+  expect(describeCycle(asked, obs(3000, { problems: ['missing the heading "## Summary"'] }), cfg)).toBe('checkpoint: repairing the handoff in 0:07 (quiet)')
+  expect(describeCycle(asked, obs(3000, { problems: [] }), cfg)).toBe('checkpoint: clearing in 0:07 (quiet)')
+  // And the cycle agrees: a missing file is never cleared over
+  expect(step(asked, obs(11_000, { problems: undefined }), cfg).action).toBe('repair')
+})
+
 test('injectedHandoff adds a header, cuts at 400 lines with a note, and skips an empty file', async () => {
   expect(injectedHandoff('H.md', '  \n')).toBeUndefined()
   expect(injectedHandoff('H.md', 'a\nb\n')).toBe('Project state from the handoff file (Tether): H.md\n\na\nb')

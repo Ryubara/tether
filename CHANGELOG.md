@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.0-alpha.28
+
+- Changed: Fleet and Watch draw in one pane, titled Tether: Fleet's table on top, Watch's poller boxes beneath, each
+  section left out while its part is off. `/tether-fleet` and `/tether-watch pane` open and focus it; `/tether-watch`
+  opens it beside its report; `fleet.openOnStart` or `watch.openOnStart` opens it once. One pane, one size:
+  `fleet.pane`, with `watch.pane` filling a dimension it leaves unset.
+- Fixed: a resumed session showed its main context as 0k until its first request, so the checkpoint could not be
+  due. Until Tether sees a request of its own, the main context is the engine's live figure (the status line's);
+  after a clear it is not, since the new conversation starts empty.
+- Fixed: the checkpoint's pane line said "clearing" while the handoff file was missing. It now says it waits for
+  the file, or repairs a failing one, and says "clearing" only over a handoff that passes.
+- Fixed: after a clear, which raises no session start for a plugin, the Tether pane reopens (with `openOnStart`)
+  and, with `injectHandoff`, the next prompt (the checkpoint's continue, or the person's) carries the handoff as
+  context, once; a session start that adds it first leaves the prompt without it.
+
 ## 1.0.0-alpha.27
 
 - Added: `cacheGuard.registerTools` (option `cacheGuardRegisterTools`, default on). Off, Tether registers neither

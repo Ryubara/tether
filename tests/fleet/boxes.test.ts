@@ -43,15 +43,15 @@ test('the pane draws watch\'s boxes under the table when watchState names its fi
   on('ui.status', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.invalidate', () => ({ value: undefined }))
-  on('ui.panes', () => ({ value: [{ id: 'fleet', title: 'Fleet', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.panes', () => ({ value: [{ id: 'tether', title: 'Tether', isShown: true, isFocused: false, isPlaced: true }] }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await clock.advance(2000)
   const ui: any = await $.ui.mount({
     plugin: 'fleet',
     surface: 'terminal',
     component: 'Pane',
-    requestId: 'fleet',
-    props: { title: 'Fleet', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    requestId: 'tether',
+    props: { title: 'Tether', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
   } as any)
   const texts = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
   expect(texts).toContain('pr-guard  next in 3:10')

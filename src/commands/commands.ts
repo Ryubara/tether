@@ -22,9 +22,9 @@ function command(name: string, text: string, pane: boolean, argumentHint?: strin
   return { name: `tether-${name}`, description: pane ? `${text} ${PANE_MARK}` : text, pane, ...(argumentHint ? { argumentHint } : {}) }
 }
 
-/** `/tether-fleet` opens the agents pane; `/tether-fleet text` prints it in the transcript. */
+/** `/tether-fleet` opens the Tether pane (agents on top, watch's boxes under them); `/tether-fleet text` prints the table. */
 export const FLEET = command('fleet', 'Agents, context, cache and usage', true, '[text]')
-/** `/tether-watch` reports the pollers; `pane` opens their boxes. */
+/** `/tether-watch` reports the pollers and opens the Tether pane beside the report; `pane` opens and focuses it. */
 export const WATCH = command('watch', 'Pollers and what they found', true, '[run [id] | forget [id] | reload | pane]')
 /** `/tether-guards` prints the open PR problems and undecided agents as text. */
 export const GUARDS = command('guards', 'PR problems and stopped agents nobody has dealt with', false)

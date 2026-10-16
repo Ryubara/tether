@@ -184,8 +184,8 @@ test('/tether-watch pane draws a box per poller with its countdown and findings'
     plugin: 'watch',
     surface: 'terminal',
     component: 'Pane',
-    requestId: 'watch',
-    props: { title: 'Watch', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    requestId: 'tether',
+    props: { title: 'Tether', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
   } as any)
   const texts = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
   expect(texts.some((t: string) => /^Pull requests {2}next in 4:5[0-9]$/.test(t))).toBe(true)

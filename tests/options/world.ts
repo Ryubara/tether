@@ -22,6 +22,10 @@ export type World = {
   /** The session's messages (session.messages). */
   messages: unknown[]
   submits: string[]
+  /** The context each submitted prompt carried down to the engine, in the order of `submits`. */
+  submitContexts: Array<readonly string[] | undefined>
+  /** The engine's live main context (session.usage `context.tokens`); undefined: none yet. */
+  usageTokens?: number
   toasts: string[]
   logs: string[]
   statuses: string[]
@@ -56,6 +60,7 @@ export function world(over: Partial<World> = {}): World {
     agents: [],
     messages: [],
     submits: [],
+    submitContexts: [],
     toasts: [],
     logs: [],
     statuses: [],
@@ -100,7 +105,7 @@ export async function start($: any, on: any, w: World) {
   on('session.cwd', () => ({ value: '/work' }))
   on('session.id', () => ({ value: w.sessionId }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
-  on('session.usage', () => ({ value: { rateLimits: [] } }))
+  on('session.usage', () => ({ value: { rateLimits: [], context: { window: 1_000_000, ...(w.usageTokens !== undefined ? { tokens: w.usageTokens } : {}) } } }))
   on('fs.exists', ($: any, e: any) => ({ value: fileOf(w, e.path) !== undefined }))
   on('fs.read', ($: any, e: any) => {
     w.reads.push(norm(e.path))
@@ -122,6 +127,7 @@ export async function start($: any, on: any, w: World) {
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.submit', ($: any, e: any) => {
     w.submits.push(e.text)
+    w.submitContexts.push(e.context)
     return { text: e.text, origin: e.origin }
   })
   on('session.send', ($: any, e: any) => {
@@ -149,6 +155,7 @@ export async function start($: any, on: any, w: World) {
   on('ui.panes', () => ({ value: [] }))
   on('classic.Stop', () => ({}))
   on('classic.SessionStart', () => ({}))
+  on('classic.UserPromptSubmit', () => ({}))
   on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
   on('tool.call', ($: any, e: any) => {
     if (e.tool === 'TaskStop') {

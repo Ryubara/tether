@@ -189,6 +189,67 @@ test('/tether-checkpoint while a cycle runs says so and starts nothing', { timeo
   expect(asks(w)).toBe(1)
 })
 
+test('a resumed session that has made no request yet is due by the engine\'s context, not "now 0k"', { timeoutMs: 30_000 }, async ($, on) => {
+  // No model request after the start: only the engine's live figure knows the session is long
+  const w = world({ usageTokens: 420_000, files: { '.claude/tether.json': CONFIG, 'HANDOFF.md': HANDOFF } })
+  const clock = await start($, on, w)
+  await clock.advance(3 * SEC)
+  expect(asks(w)).toBe(1)
+})
+
+test('after a clear the engine\'s figure of the ended conversation is not taken for the new one', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ usageTokens: 50_000, files: { '.claude/tether.json': CONFIG, 'HANDOFF.md': HANDOFF } })
+  const clock = await start($, on, w)
+  await clock.advance(3 * SEC)
+  expect(asks(w)).toBe(0)
+  await clearSession($, w)
+  // The engine may still report the old window for a moment: it must not make the new session due
+  w.usageTokens = 420_000
+  await clock.advance(30 * SEC)
+  expect(asks(w)).toBe(0)
+})
+
+const INJECT = JSON.stringify({ checkpoint: { enabled: true, contextTokens: 100_000, quietSeconds: 5, tickSeconds: 1, retryMinutes: 10, injectHandoff: true } })
+
+test("after Tether's clear the engine's prompt hook adds the handoff to the continue, once", { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ context: 150_000, files: { '.claude/tether.json': INJECT, 'HANDOFF.md': HANDOFF } })
+  on('command.run', ($: any, e: any, next: any) => (e.command === 'clear' ? {} : next(e)))
+  const clock = await start($, on, w)
+  await step($, 'main')
+  await clock.advance(10 * SEC)
+  await clearSession($, w)
+  await clock.advance(60 * SEC)
+  expect(continues(w)).toBe(1)
+  // The engine takes the continue and raises UserPromptSubmit for it
+  const r: any = await ($ as any).classic.UserPromptSubmit({ prompt: 'Continue from HANDOFF.md.' })
+  expect((r?.additionalContext ?? []).some((c: string) => c.includes('## Next steps'))).toBe(true)
+  expect(w.logs).toContain('checkpoint: added HANDOFF.md to the session')
+  // The next prompt does not carry it again, on either path
+  const again: any = await ($ as any).classic.UserPromptSubmit({ prompt: 'and then?' })
+  expect(again?.additionalContext ?? []).toEqual([])
+  await $.prompt.submit({ text: 'and then?' } as any)
+  expect(w.submitContexts.at(-1) ?? []).toEqual([])
+})
+
+test('a session start after a clear injects the handoff itself, and the next prompt does not add it twice', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ files: { '.claude/tether.json': INJECT, 'HANDOFF.md': HANDOFF } })
+  const clock = await start($, on, w)
+  await clearSession($, w)
+  const ss: any = await ($ as any).classic.SessionStart({ source: 'clear' })
+  expect((ss?.additionalContext ?? []).some((c: string) => c.includes('## Next steps'))).toBe(true)
+  await $.prompt.submit({ text: 'go on' } as any)
+  await clock.advance(1 * SEC)
+  expect(w.submitContexts.at(-1) ?? []).toEqual([])
+})
+
+test("the person's first prompt after their own clear carries the handoff when injectHandoff is on", { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ files: { '.claude/tether.json': INJECT, 'HANDOFF.md': HANDOFF } })
+  await start($, on, w)
+  await clearSession($, w)
+  await $.prompt.submit({ text: 'where were we?' } as any)
+  expect((w.submitContexts.at(-1) ?? []).some(c => c.includes('## Next steps'))).toBe(true)
+})
+
 test('/tether-checkpoint while the checkpoint is off starts nothing', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world({ context: 150_000, files: { '.claude/tether.json': '{}', 'HANDOFF.md': HANDOFF } })
   const clock = await start($, on, w)
