@@ -19,7 +19,7 @@ import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type Watch
 import { agentFindings, fresh, readOutput, readPlainOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
-import { askText, backedOff, continueText, describeCycle, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
+import { askText, backedOff, continueText, describeCycle, forceCheckpoint, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 import { alerted, decisionProblem, planActions, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
 import { CACHE_GUARD_DEFAULTS, mergeCacheGuard, type CacheGuardConfig } from '../src/guards/config'
 import { ACTIVE_RERUN, CAUSES, GH_FIELDS, fromGh, plainProblem, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
@@ -29,7 +29,7 @@ import { DEFAULT_CONFIG_FILE, HALT_TEXT, OPEN_POLICY, commandRefusal, configSour
 import { AGENT_STATUSES, hashKey, plainCode, plainError, plainId, plainLimitKind } from '../src/options/plain'
 import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
 import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
-import { FLEET, GUARDS, WATCH, registration } from '../src/commands/commands'
+import { CHECKPOINT, FLEET, GUARDS, WATCH, registration } from '../src/commands/commands'
 import { logName, renderConversation, type LogMessage } from '../src/conversation/render'
 
 // ---- FLEET ----
@@ -1013,7 +1013,7 @@ async function checkpointTick($: any): Promise<void> {
     // The handoff is read only once a handoff is in progress, the messages from the tick that may ask on: the
     // count at the ask is the baseline later ticks are measured against, so it must be the real one
     const inProgress = cpState.phase !== 'idle'
-    const mayAsk = !inProgress && contextTokens >= cpCfg.contextTokens
+    const mayAsk = !inProgress && (cpState.forced || contextTokens >= cpCfg.contextTokens)
     // New information: the person's and the main agent's messages, not the cycle's own prompts or their replies
     const messages = inProgress || mayAsk ? newInformation((await $.session.messages()) as Array<{ role: string; text?: string }>, cpCfg) : 0
     const problems = inProgress ? await handoffCheck($) : []
@@ -1071,6 +1071,15 @@ async function carryOut($: any, action: Action, problems: string[] | undefined):
   $.clock.after(CLEAR_WAIT_MS, async () => {
     if ((await $.store.get(CHECKPOINT_CONTINUE_KEY)) === true) await clearNotDone($)
   })
+}
+
+/** `/tether-checkpoint`: start the cycle now when it is on and idle; the next tick asks once the session is quiet. */
+async function checkpointCommand($: any): Promise<{ text: string }> {
+  if (halted) return { text: 'checkpoint: off, the config failed closed, so nothing was started' }
+  const { state, reply } = forceCheckpoint(cpState, cpCfg)
+  cpState = state
+  $.ui.log(reply)
+  return { text: reply }
 }
 
 /** The clear did not happen: drop the continue and wait before asking again, since the session is still long. */
@@ -1776,6 +1785,9 @@ export const register: Register = (on, opts) => {
     try {
       await $.command.register({ ...registration(GUARDS), immediate: true })
     } catch {}
+    try {
+      await $.command.register({ ...registration(CHECKPOINT), immediate: true })
+    } catch {}
     return fleetStart($, e, (e2: any) => watchStart($, e2, next))
   })
 
@@ -1794,6 +1806,7 @@ export const register: Register = (on, opts) => {
   on('tool.call', { tool: `mcp__tether__${TOOL_PR}` }, async ($, e) => (halted ? { deny: HALT_TEXT } : prOwnerCall($, e)))
   on('tool.call', { tool: `mcp__tether__${TOOL_AGENT}` }, async ($, e) => (halted ? { deny: HALT_TEXT } : agentDecisionCall($, e)))
   on('command.run', { command: GUARDS.name }, async ($) => ({ text: await guardsReport($) }))
+  on('command.run', { command: CHECKPOINT.name }, async ($) => checkpointCommand($))
 
   // The end of a turn is blocked while a PR problem or a stopped big agent has no owner or decision, at most
   // `stop.maxBlocks` times in a row for the same reason.

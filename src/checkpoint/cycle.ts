@@ -20,6 +20,8 @@ export type CycleState = {
   repairs: number
   /** While idle, no handoff is asked for before this time (ms): set after a give-up or a clear that did not happen. */
   retryAt: number
+  /** `/tether-checkpoint` asked for a checkpoint now: while idle, ask once quiet whatever the context or back-off. */
+  forced: boolean
 }
 
 /** What the session looked like at one tick. */
@@ -37,7 +39,7 @@ export type Observed = {
 export type Action = 'none' | 'ask' | 'update' | 'repair' | 'clear' | 'give-up'
 
 /** A cycle that is idle and has asked for nothing. */
-export const initialCycle = (): CycleState => ({ phase: 'idle', quietSince: 0, askedMessages: 0, dirty: false, repairs: 0, retryAt: 0 })
+export const initialCycle = (): CycleState => ({ phase: 'idle', quietSince: 0, askedMessages: 0, dirty: false, repairs: 0, retryAt: 0, forced: false })
 
 /** An idle cycle that waits `retryMinutes` before asking again, after a give-up or a clear that did not happen. */
 export const backedOff = (now: number, cfg: CheckpointConfig): CycleState => ({ ...initialCycle(), retryAt: now + cfg.retryMinutes * 60_000 })
@@ -48,9 +50,10 @@ export function step(state: CycleState, o: Observed, cfg: CheckpointConfig): { s
   const quietMs = cfg.quietSeconds * 1000
 
   if (state.phase === 'idle') {
-    // Due, and the person is not in the middle of anything: ask for the handoff
-    if (cfg.enabled && o.contextTokens >= cfg.contextTokens && quiet && o.now >= state.retryAt) {
-      return { state: { phase: 'asked', quietSince: o.now, askedMessages: o.messages, dirty: false, repairs: 0, retryAt: 0 }, action: 'ask' }
+    // Due (or asked for with /tether-checkpoint), and the person is not in the middle of anything: ask for the handoff
+    const due = o.contextTokens >= cfg.contextTokens && o.now >= state.retryAt
+    if (cfg.enabled && (due || state.forced) && quiet) {
+      return { state: { phase: 'asked', quietSince: o.now, askedMessages: o.messages, dirty: false, repairs: 0, retryAt: 0, forced: false }, action: 'ask' }
     }
     return { state, action: 'none' }
   }
@@ -78,6 +81,18 @@ export function step(state: CycleState, o: Observed, cfg: CheckpointConfig): { s
   return { state: backedOff(o.now, cfg), action: 'give-up' }
 }
 
+/**
+ * `/tether-checkpoint`: start the cycle now, below the context threshold and through any back-off. Only an
+ * idle, enabled cycle takes it; the reply says what happened. From the ask on it is the automatic path.
+ */
+export function forceCheckpoint(state: CycleState, cfg: CheckpointConfig): { state: CycleState; reply: string } {
+  if (!cfg.enabled) return { state, reply: 'checkpoint: off, so nothing was started' }
+  if (state.phase === 'asked') return { state, reply: `checkpoint: already running (${cfg.handoffFile} requested)` }
+  if (state.phase === 'clearing') return { state, reply: 'checkpoint: already running (clearing)' }
+  if (state.forced) return { state, reply: 'checkpoint: already requested; asking once the session is quiet' }
+  return { state: { ...state, forced: true }, reply: `checkpoint: asking for ${cfg.handoffFile} once the session is quiet` }
+}
+
 /** M:SS, for the countdown in the pane. */
 export function clock(ms: number): string {
   const s = Math.max(0, Math.ceil(ms / 1000))
@@ -90,6 +105,11 @@ export function clock(ms: number): string {
  */
 export function describeCycle(state: CycleState, o: Observed, cfg: CheckpointConfig): string {
   if (!cfg.enabled) return 'checkpoint: off'
+  if (state.phase === 'idle' && state.forced) {
+    if (o.busy) return 'checkpoint requested: waiting for the turn to end'
+    if (o.draft !== '') return 'checkpoint requested: waiting for your draft to be sent or cleared'
+    return 'checkpoint requested: asking for the handoff now'
+  }
   if (state.phase === 'idle') {
     if (o.contextTokens < cfg.contextTokens) return `checkpoint: due at ${Math.round(cfg.contextTokens / 1000)}k (now ${Math.round(o.contextTokens / 1000)}k)`
     if (o.now < state.retryAt) return `checkpoint due: asking again in ${clock(state.retryAt - o.now)}`
