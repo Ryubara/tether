@@ -26,8 +26,8 @@ run inside Claude Code (version 2.1.287 or later). See the
   `/tether-watch pane` shows a box per poller with its countdown and its findings; `/tether-watch run`, `forget` and
   `reload` poll now, tell findings again and re-read the config. `watch.openOnStart` opens the pane at every session
   start.
-- **Commands.** `/tether-fleet` (pane; `text` prints it), `/tether-watch` (pane; `run`, `forget`, `reload`) and
-  `/tether-guards` (text). Pane commands say `(PANE)` in the command list. The names are prefixed with `tether-`
+- **Commands.** `/tether-fleet` (pane; `text` prints it), `/tether-watch` (pane; `run`, `forget`, `reload`),
+  `/tether-guards` (text) and `/tether-checkpoint` (a checkpoint now). Pane commands say `(PANE)` in the command list. The names are prefixed with `tether-`
   because the plugin API takes only letters, digits, `_` and `-` in a command name (no `:`).
 - **Services row.** The pane starts with one line naming each service: `✅ Fleet` in green when it is on,
   `❌ Watch` dimmed when it is off. A service is off when its section sets `"enabled": false`; it then runs
@@ -40,6 +40,9 @@ run inside Claude Code (version 2.1.287 or later). See the
   clears over a handoff that fails its check. Nothing is cleared while you are typing or a turn is running.
   Any clear, its own or yours, starts the cycle over with the old session's context forgotten. After a give-up, or
   a clear that did not happen, it waits `retryMinutes` (default 15) before asking again.
+  `/tether-checkpoint` starts the same cycle now, below `contextTokens` and through a back-off: the handoff is
+  asked for once the session is quiet, checked and repaired the same way, then cleared and continued from. It
+  does nothing while the checkpoint is off or a cycle is already running, and says so.
   With `"injectHandoff": true` (off by default), every session start (new, resumed, cleared or compacted) adds the
   handoff's text to the session as context, under a header line, cut at 400 lines with a note to trim it; a missing
   or empty handoff adds nothing. It works through the `SessionStart` hook's `additionalContext`, the one place

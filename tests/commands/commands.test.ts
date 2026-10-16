@@ -2,7 +2,7 @@
 // says (PANE) exactly when the command opens or shows something in the pane.
 import { expect, mock, test } from 'claude-code/testing'
 
-import { COMMANDS, FLEET, GUARDS, PANE_MARK, WATCH } from '../../src/commands/commands'
+import { CHECKPOINT, COMMANDS, FLEET, GUARDS, PANE_MARK, WATCH } from '../../src/commands/commands'
 
 type Registered = { name: string; description: string; argumentHint?: string }
 
@@ -37,7 +37,7 @@ async function registered($: any, on: any): Promise<Registered[]> {
 }
 
 test('the table names every command with the tether- prefix and marks pane commands with (PANE)', async () => {
-  expect(COMMANDS.map(c => c.name)).toEqual(['tether-fleet', 'tether-watch', 'tether-guards'])
+  expect(COMMANDS.map(c => c.name)).toEqual(['tether-fleet', 'tether-watch', 'tether-guards', 'tether-checkpoint'])
   for (const c of COMMANDS) expect([c.name, c.description.includes('(PANE)')]).toEqual([c.name, c.pane])
   expect(PANE_MARK).toBe('(PANE)')
   // $.command.register takes letters, digits, _ and - only, up to 64
@@ -68,9 +68,17 @@ test('tether-guards is registered, and its description does not say (PANE) becau
   expect(c[0]?.description).toBe(GUARDS.description)
 })
 
+test('tether-checkpoint is registered, and its description does not say (PANE) because it only prints text', { timeoutMs: 30_000 }, async ($, on) => {
+  const seen = await registered($, on)
+  const c = seen.filter(x => x.name === 'tether-checkpoint')
+  expect(c.length).toBe(1)
+  expect(c[0]?.description).not.toContain('(PANE)')
+  expect(c[0]?.description).toBe(CHECKPOINT.description)
+})
+
 test('no command is registered under an unprefixed name', { timeoutMs: 30_000 }, async ($, on) => {
   const seen = await registered($, on)
-  expect(seen.map(x => x.name).sort()).toEqual(['tether-fleet', 'tether-guards', 'tether-watch'])
+  expect(seen.map(x => x.name).sort()).toEqual(['tether-checkpoint', 'tether-fleet', 'tether-guards', 'tether-watch'])
 })
 
 test('each command answers to its prefixed name only', { timeoutMs: 30_000 }, async ($, on) => {

@@ -29,8 +29,11 @@ export const WATCH = command('watch', 'Pollers and what they found', true, '[run
 /** `/tether-guards` prints the open PR problems and undecided agents as text. */
 export const GUARDS = command('guards', 'PR problems and stopped agents nobody has dealt with', false)
 
+/** `/tether-checkpoint` starts the checkpoint now: the handoff asked for, checked, then the clear and the continue. */
+export const CHECKPOINT = command('checkpoint', 'Write and check the handoff, then clear and continue, now', false)
+
 /** Every command Tether registers. */
-export const COMMANDS: TetherCommand[] = [FLEET, WATCH, GUARDS]
+export const COMMANDS: TetherCommand[] = [FLEET, WATCH, GUARDS, CHECKPOINT]
 
 /** What `$.command.register` takes for a command: it refuses any other field (`pane`). */
 export function registration(c: TetherCommand): { name: string; description: string; argumentHint?: string } {

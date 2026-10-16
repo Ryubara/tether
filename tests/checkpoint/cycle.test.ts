@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../../src/checkpoint/handoff'
-import { askText, backedOff, clock, describeCycle, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
+import { askText, backedOff, clock, describeCycle, forceCheckpoint, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
 
 const cfg: CheckpointConfig = { ...CHECKPOINT_DEFAULTS, enabled: true, contextTokens: 1000, quietSeconds: 10, maxRepairs: 2 }
 const GOOD = '## Where to look\nx\n## Summary\nx\n## Next steps\nx\n## Open questions\nx\n'
@@ -81,6 +81,38 @@ test('after a give-up the still-long session is asked again only after retryMinu
   const again = step(given, obs(10 * 60_000), c)
   expect(again.action).toBe('ask')
   expect(again.state.retryAt).toBe(0)
+})
+
+test('a forced checkpoint asks below the context threshold, once quiet, and the flag is gone after the ask', () => {
+  const forced = forceCheckpoint(initialCycle(), cfg)
+  expect(forced.state.forced).toBe(true)
+  expect(forced.reply).toBe('checkpoint: asking for HANDOFF.md once the session is quiet')
+  expect(step(forced.state, obs(0, { contextTokens: 10, busy: true }), cfg).action).toBe('none')
+  expect(describeCycle(forced.state, obs(0, { contextTokens: 10, busy: true }), cfg)).toMatch(/requested: waiting for the turn/)
+  const asked = step(forced.state, obs(0, { contextTokens: 10 }), cfg)
+  expect(asked.action).toBe('ask')
+  expect(asked.state.forced).toBe(false)
+  // From the ask on it is the automatic path: a passing handoff after quiet clears
+  expect(step(asked.state, obs(10000, { contextTokens: 10, problems: [] }), cfg).action).toBe('clear')
+})
+
+test('a forced checkpoint asks during a back-off', () => {
+  const c = { ...cfg, retryMinutes: 10 }
+  const given = backedOff(0, c)
+  expect(step(given, obs(60_000), c).action).toBe('none')
+  expect(step(forceCheckpoint(given, c).state, obs(60_000), c).action).toBe('ask')
+})
+
+test('a forced checkpoint does nothing while checkpoints are off, or while a cycle runs', () => {
+  const off = { ...cfg, enabled: false }
+  const r = forceCheckpoint(initialCycle(), off)
+  expect(r.reply).toBe('checkpoint: off, so nothing was started')
+  expect(r.state.forced).toBe(false)
+  expect(step({ ...initialCycle(), forced: true }, obs(0), off).action).toBe('none')
+  const asked = step(initialCycle(), obs(0), cfg).state
+  expect(forceCheckpoint(asked, cfg)).toEqual({ state: asked, reply: 'checkpoint: already running (HANDOFF.md requested)' })
+  const clearing = { ...asked, phase: 'clearing' as const }
+  expect(forceCheckpoint(clearing, cfg).reply).toBe('checkpoint: already running (clearing)')
 })
 
 test('a missing handoff file is never cleared over', () => {

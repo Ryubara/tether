@@ -3,7 +3,7 @@
 // returns, and a clear that did not happen waits `retryMinutes` before asking again. Synthetic data only.
 import { expect, test } from 'claude-code/testing'
 
-import { clearSession, MIN, SEC, start, step, world, type World } from '../options/world'
+import { clearSession, command, MIN, SEC, start, step, world, type World } from '../options/world'
 
 const HANDOFF = '## Where to look\nx\n## Summary\nx\n## Next steps\nx\n## Open questions\nx\n'
 const CONFIG = JSON.stringify({ checkpoint: { enabled: true, contextTokens: 100_000, quietSeconds: 5, tickSeconds: 1, retryMinutes: 10 } })
@@ -154,4 +154,46 @@ test('a session with history is cleared after the reply to the ask, not asked to
   expect(w.submits.filter(t => t.includes('Update HANDOFF.md'))).toEqual([])
   expect(asks(w)).toBe(1)
   expect(cleared).toBe(true)
+})
+
+test('/tether-checkpoint runs the whole cycle in a short session: ask, check, clear, continue', { timeoutMs: 30_000 }, async ($, on) => {
+  let cleared = false
+  const w = world({ context: 1_000, files: { '.claude/tether.json': CONFIG, 'HANDOFF.md': HANDOFF } })
+  on('command.run', ($: any, e: any, next: any) => {
+    if (e.command !== 'clear') return next(e)
+    cleared = true
+    return {}
+  })
+  const clock = await start($, on, w)
+  await step($, 'main')
+  await clock.advance(10 * SEC)
+  expect(asks(w)).toBe(0)
+  expect(await command($, 'tether-checkpoint')).toBe('checkpoint: asking for HANDOFF.md once the session is quiet')
+  await clock.advance(2 * SEC)
+  expect(asks(w)).toBe(1)
+  await clock.advance(10 * SEC)
+  expect(cleared).toBe(true)
+  await clearSession($, w)
+  await clock.advance(60 * SEC)
+  expect(continues(w)).toBe(1)
+  // The new, short session is not asked again
+  expect(asks(w)).toBe(1)
+})
+
+test('/tether-checkpoint while a cycle runs says so and starts nothing', { timeoutMs: 30_000 }, async ($, on) => {
+  const { w, clock } = await longSession($, on, () => ({}))
+  await clock.advance(2 * SEC)
+  expect(asks(w)).toBe(1)
+  expect(await command($, 'tether-checkpoint')).toBe('checkpoint: already running (HANDOFF.md requested)')
+  await clock.advance(2 * SEC)
+  expect(asks(w)).toBe(1)
+})
+
+test('/tether-checkpoint while the checkpoint is off starts nothing', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ context: 150_000, files: { '.claude/tether.json': '{}', 'HANDOFF.md': HANDOFF } })
+  const clock = await start($, on, w)
+  await step($, 'main')
+  expect(await command($, 'tether-checkpoint')).toBe('checkpoint: off, so nothing was started')
+  await clock.advance(30 * SEC)
+  expect(asks(w)).toBe(0)
 })

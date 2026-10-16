@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0-alpha.26
+
+- Added: `/tether-checkpoint` starts the checkpoint now, whatever the context size and through a back-off. From
+  the request on it is the automatic cycle: the handoff asked for once the session is quiet, checked, repaired up
+  to `maxRepairs` times, then the clear and `Continue from <handoff>.`; a handoff that never passes is not cleared
+  over. It does nothing, and says so, while the checkpoint is off, the config has failed closed, or a cycle is
+  already running.
+
 ## 1.0.0-alpha.25
 
 - Fixed: after the checkpoint's own clear, the new session now gets `Continue from <handoff>.` A clear reaches a
