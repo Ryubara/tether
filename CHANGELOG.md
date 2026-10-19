@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-alpha.29
+
+- Added: the `TETHER_HANDOFF_FILE` environment variable names a session's handoff file, relative to its folder, over
+  `checkpoint.handoffFile` (a locked file's too), so sessions started in one folder each checkpoint into their own
+  file. A value that is absolute or leaves the folder turns that session's checkpoint off.
+
 ## 1.0.0-alpha.28
 
 - Changed: Fleet and Watch draw in one pane, titled Tether: Fleet's table on top, Watch's poller boxes beneath, each

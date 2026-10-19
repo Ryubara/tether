@@ -17,7 +17,7 @@ import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type Poller, type WatchConfig } from '../src/watch/config'
 import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type WatchState as WatchStateData } from '../src/watch/boxes'
 import { agentFindings, fresh, readOutput, readPlainOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
-import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../src/checkpoint/config'
+import { CHECKPOINT_DEFAULTS, mergeCheckpoint, withHandoffEnv, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, backedOff, continueText, describeCycle, forceCheckpoint, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
 import { alerted, decisionProblem, planActions, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
@@ -1037,10 +1037,27 @@ let cpTicking = false
 /** The line the pane shows for the checkpoint, refreshed each tick. */
 let cpLine = ''
 
+/**
+ * The checkpoint config from the config file and the options, with this session's handoff file from
+ * TETHER_HANDOFF_FILE (HANDOFF_ENV) when it is set; a bad one turns the checkpoint off and is logged.
+ */
+async function checkpointConfig($: any, root: Record<string, unknown> | undefined): Promise<CheckpointConfig> {
+  let env: string | undefined
+  try {
+    // The literal name, so the engine can list what the module reads (it is HANDOFF_ENV)
+    env = (await $.env.get('TETHER_HANDOFF_FILE')) ?? undefined
+  } catch {
+    // An environment Tether cannot read names no handoff file
+  }
+  const { cfg, problem } = withHandoffEnv(mergeCheckpoint(layered(optionLayer(), 'checkpoint', root?.checkpoint)), env)
+  if (problem) $.ui.log(`checkpoint: off, ${problem}`)
+  return cfg
+}
+
 /** Reads the checkpoint section of the config and starts the tick. */
 async function checkpointStart($: any): Promise<void> {
   const { root } = await readTetherConfig($, true)
-  cpCfg = halted ? { ...CHECKPOINT_DEFAULTS, enabled: false, injectHandoff: false } : mergeCheckpoint(layered(optionLayer(), 'checkpoint', root?.checkpoint))
+  cpCfg = halted ? { ...CHECKPOINT_DEFAULTS, enabled: false, injectHandoff: false } : await checkpointConfig($, root)
   for (const t of cpTimers) t.cancel()
   cpTimers = cpCfg.enabled ? [$.clock.every(cpCfg.tickSeconds * 1000, () => checkpointTick($)) as any] : []
 }
@@ -1774,7 +1791,7 @@ async function handoffContext($: any): Promise<string | undefined> {
     const { root } = await readTetherConfig($, true)
     // Failed closed, or plainOutput: the handoff's text is not put in the session
     if (halted || plain()) return undefined
-    const cfg = mergeCheckpoint(layered(optionLayer(), 'checkpoint', root?.checkpoint))
+    const cfg = await checkpointConfig($, root)
     if (!cfg.injectHandoff || !(await $.fs.exists(cfg.handoffFile))) return undefined
     return injectedHandoff(cfg.handoffFile, String(await $.fs.read(cfg.handoffFile)))
   } catch (err) {

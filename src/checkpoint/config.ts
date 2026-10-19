@@ -53,3 +53,23 @@ export function mergeCheckpoint(raw: unknown): CheckpointConfig {
   }
   return out
 }
+
+/**
+ * The environment variable that names this session's handoff file. Whoever starts the session sets it, so two
+ * sessions in one folder can each keep their own handoff; it wins over `checkpoint.handoffFile`, a locked file's too.
+ */
+export const HANDOFF_ENV = 'TETHER_HANDOFF_FILE'
+
+/**
+ * Applies `TETHER_HANDOFF_FILE` to a checkpoint config. Unset or empty: the config as it is. A path relative to the
+ * session's folder that stays inside it: that path is the handoff file. Anything else (absolute, a `..` part, a
+ * control character) turns the checkpoint off, so a session never clears onto a handoff it was not meant to use.
+ */
+export function withHandoffEnv(cfg: CheckpointConfig, env: string | undefined): { cfg: CheckpointConfig; problem?: string } {
+  if (typeof env !== 'string' || env.trim() === '') return { cfg }
+  const file = env.trim()
+  const parts = file.split(/[\\/]/)
+  const ok = !/^([a-zA-Z]:|[\\/])/.test(file) && !/[\u0000-\u001f]/.test(file) && parts.every(p => p !== '' && p !== '..')
+  if (!ok) return { cfg: { ...cfg, enabled: false, injectHandoff: false }, problem: `${HANDOFF_ENV} must be a path inside the session's folder` }
+  return { cfg: { ...cfg, handoffFile: file } }
+}
