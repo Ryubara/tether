@@ -258,6 +258,14 @@ set in the file, under its section.
 The file is picked once each time the plugin loads; `/tether-watch reload` reads that same file again and applies it
 to every part.
 
+### One handoff file per session
+
+The `TETHER_HANDOFF_FILE` environment variable names this session's handoff file, relative to the session's folder.
+It wins over `checkpoint.handoffFile` (and its option), a locked file's included, so several sessions started in one
+folder each checkpoint into their own file: the launcher sets it, and the session cannot change it. A value that is
+absolute or leaves the folder (a `..` part) turns the checkpoint off for that session, with the log line `checkpoint:
+off, TETHER_HANDOFF_FILE must be a path inside the session's folder`; unset or empty leaves the config's file.
+
 ### Top-level keys
 
 | Key | Type | Default | What it does |

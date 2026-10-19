@@ -258,3 +258,25 @@ test('/tether-checkpoint while the checkpoint is off starts nothing', { timeoutM
   await clock.advance(30 * SEC)
   expect(asks(w)).toBe(0)
 })
+
+test('TETHER_HANDOFF_FILE gives a session its own handoff file, over a locked config', { timeoutMs: 30_000 }, async ($, on) => {
+  const locked = JSON.stringify({ locked: true, checkpoint: { enabled: true, contextTokens: 100_000, quietSeconds: 5, tickSeconds: 1, injectHandoff: true, handoffFile: 'notes/HANDOFF.md' } })
+  const mine = 'jobs/job-1.handoff.md'
+  const w = world({ context: 150_000, env: { TETHER_CONFIG: '/zone/tether.json', TETHER_HANDOFF_FILE: mine }, files: { '/zone/tether.json': locked, 'notes/HANDOFF.md': HANDOFF, [mine]: HANDOFF.replace('x\n## Next steps', 'mine\n## Next steps') } })
+  const clock = await start($, on, w)
+  const ss: any = await ($ as any).classic.SessionStart({ source: 'startup' })
+  expect((ss?.additionalContext ?? []).some((c: string) => c.includes('mine'))).toBe(true)
+  await step($, 'main')
+  await clock.advance(3 * SEC)
+  expect(w.submits.filter(t => t.startsWith('Checkpoint:') && t.includes(mine)).length).toBe(1)
+  expect(w.submits.some(t => t.includes('notes/HANDOFF.md'))).toBe(false)
+})
+
+test('a TETHER_HANDOFF_FILE outside the session folder turns the checkpoint off', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ context: 150_000, env: { TETHER_HANDOFF_FILE: '../other/HANDOFF.md' }, files: { '.claude/tether.json': CONFIG, 'HANDOFF.md': HANDOFF } })
+  const clock = await start($, on, w)
+  await step($, 'main')
+  await clock.advance(30 * SEC)
+  expect(asks(w)).toBe(0)
+  expect(w.logs).toContain("checkpoint: off, TETHER_HANDOFF_FILE must be a path inside the session's folder")
+})

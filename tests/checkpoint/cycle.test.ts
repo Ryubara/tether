@@ -1,7 +1,7 @@
 // Tests of the checkpoint cycle and handoff check: when to ask, when to clear, and what never happens.
 import { expect, test } from 'claude-code/testing'
 
-import { CHECKPOINT_DEFAULTS, mergeCheckpoint, type CheckpointConfig } from '../../src/checkpoint/config'
+import { CHECKPOINT_DEFAULTS, HANDOFF_ENV, mergeCheckpoint, withHandoffEnv, type CheckpointConfig } from '../../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../../src/checkpoint/handoff'
 import { askText, backedOff, clock, describeCycle, forceCheckpoint, initialCycle, isCyclePrompt, newInformation, repairText, step, type Observed } from '../../src/checkpoint/cycle'
 
@@ -211,4 +211,26 @@ test('injectedHandoff adds a header, cuts at 400 lines with a note, and skips an
   expect(long).toContain('H.md is 450 lines')
   expect(mergeCheckpoint({ injectHandoff: true }).injectHandoff).toBe(true)
   expect(CHECKPOINT_DEFAULTS.injectHandoff).toBe(false)
+})
+
+test('TETHER_HANDOFF_FILE unset or empty leaves the handoff file as configured', () => {
+  expect(withHandoffEnv(cfg, undefined).cfg.handoffFile).toBe(cfg.handoffFile)
+  expect(withHandoffEnv(cfg, '  ').cfg).toEqual(cfg)
+})
+
+test('TETHER_HANDOFF_FILE names the handoff file, over the configured one', () => {
+  const r = withHandoffEnv({ ...cfg, handoffFile: 'notes/HANDOFF.md' }, ' jobs/20260101T000000Z-abc123.handoff.md ')
+  expect(r.problem).toBeUndefined()
+  expect(r.cfg.handoffFile).toBe('jobs/20260101T000000Z-abc123.handoff.md')
+  expect(r.cfg.enabled).toBe(true)
+  expect(withHandoffEnv(cfg, 'jobs\\one.md').cfg.handoffFile).toBe('jobs\\one.md')
+})
+
+test('a TETHER_HANDOFF_FILE outside the session folder turns the checkpoint off', () => {
+  for (const bad of ['/etc/x.md', 'C:\\x.md', 'c:x.md', '\\\\host\\x.md', '../x.md', 'notes/../../x.md', 'jobs//x.md', 'jobs/x.md/', 'a\u0007.md']) {
+    const r = withHandoffEnv({ ...cfg, injectHandoff: true }, bad)
+    expect(r.problem).toBe(`${HANDOFF_ENV} must be a path inside the session's folder`)
+    expect(r.cfg.enabled).toBe(false)
+    expect(r.cfg.injectHandoff).toBe(false)
+  }
 })
