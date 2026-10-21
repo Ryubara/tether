@@ -114,14 +114,14 @@ export type PrsPoller = Reminders & {
 
 /**
  * A poller over the project's open issues on GitHub (read with `gh`): each open issue carrying one of `labels` is a
- * finding, keyed by its number, the label and when it last changed, so it is told once until it changes or loses
- * the label. Nothing of the issue but its number and the configured label is told.
+ * finding, keyed by its number and the label, so it is told once while it keeps the label (its `remindMinutes` tells
+ * it again). Nothing of the issue but its number and the configured label is told.
  */
 export type IssuesPoller = Reminders & {
   kind: 'issues'
   id: string
   everySeconds: number
-  /** The labels that make an open issue a finding; an issue with two of them is two findings. */
+  /** The labels that make an open issue a finding; an issue with two of them is two findings. No commas (`gh` splits on them). */
   labels: string[]
   /** Working directory of `gh` (it reads that folder's repository); absent, the session's. */
   cwd?: string
@@ -160,7 +160,10 @@ export type WatchConfig = {
   pane: { rows?: number; columns?: number }
   /** A file watch writes the boxes' data to, for fleet (its `watchState`) to draw under its table; empty: none. */
   stateFile: string
-  /** Wake the model after this many idle minutes with no subagent at work, though nothing was found; 0: never. */
+  /**
+   * Wake the model after this many idle minutes, though nothing was found, while no subagent is at work (or stopped
+   * with background tasks) and the main loop has no background task of its own; 0: never.
+   */
   idleWakeMinutes: number
   /** The idle wake's prompt; `{minutes}` stands for idleWakeMinutes. */
   idleWakeText: string
@@ -240,8 +243,9 @@ function poller(raw: unknown, i: number, problems: string[], agentContextTokens:
   }
   if (r.kind === 'issues') {
     const labels = r.labels
-    if (!Array.isArray(labels) || labels.length === 0 || !labels.every(l => typeof l === 'string' && l.trim() !== '')) {
-      problems.push(`${id}: labels must be a non-empty list of label names`)
+    if (!Array.isArray(labels) || labels.length === 0 || !labels.every(l => typeof l === 'string' && l.trim() !== '' && !l.includes(','))) {
+      // `gh --label a,b` means both labels, so a comma would change what is read
+      problems.push(`${id}: labels must be a non-empty list of label names without commas`)
       return undefined
     }
     return {

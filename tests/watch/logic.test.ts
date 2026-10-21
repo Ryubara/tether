@@ -2,7 +2,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { parseConfig, type AgentsPoller, type CommandPoller, type IssuesPoller } from '../../src/watch/config'
-import { agentFindings, fresh, idleWakeDue, issueFindings, readOutput, remindAfterMs, requeue, wakeText, wakeVerdict, type Pending } from '../../src/watch/findings'
+import { agentFindings, atWork, fresh, idleWakeDue, issueFindings, liveBackground, readOutput, remindAfterMs, requeue, wakeText, wakeVerdict, type Pending } from '../../src/watch/findings'
 
 const MIN = 60_000
 
@@ -140,12 +140,17 @@ test('an issues poller needs labels and fills its defaults', async () => {
       { id: 'triage', kind: 'issues', labels: ['needs-triage', ' needs-triage ', 'bug'] },
       { id: 'nolabels', kind: 'issues' },
       { id: 'emptylabel', kind: 'issues', labels: [''] },
+      { id: 'comma', kind: 'issues', labels: ['a,b'] },
     ],
   })
   expect(config.pollers.map(p => p.id)).toEqual(['triage'])
   const p = config.pollers[0] as IssuesPoller
   expect([p.kind, p.labels, p.everySeconds, p.timeoutMs, p.limit, p.wake, p.remindMinutes]).toEqual(['issues', ['needs-triage', 'bug'], 120, 60_000, 100, true, 0])
-  expect(problems).toEqual(['nolabels: labels must be a non-empty list of label names', 'emptylabel: labels must be a non-empty list of label names'])
+  expect(problems).toEqual([
+    'nolabels: labels must be a non-empty list of label names without commas',
+    'emptylabel: labels must be a non-empty list of label names without commas',
+    'comma: labels must be a non-empty list of label names without commas',
+  ])
 })
 
 test('the idle wake, its text and the resend window have defaults and take the file values', async () => {
@@ -154,12 +159,13 @@ test('the idle wake, its text and the resend window have defaults and take the f
   expect(d.idleWakeText).toContain('{minutes}')
   const c = parseConfig({ idleWakeMinutes: 45, idleWakeText: 'go on', resendAfterMinutes: 5 }).config
   expect([c.idleWakeMinutes, c.idleWakeText, c.resendAfterMinutes]).toEqual([45, 'go on', 5])
-  expect(parseConfig({ idleWakeMinutes: -1, resendAfterMinutes: 0 }).config.resendAfterMinutes).toBe(2)
+  const bad = parseConfig({ idleWakeMinutes: -1, resendAfterMinutes: 0 }).config
+  expect([bad.idleWakeMinutes, bad.resendAfterMinutes]).toEqual([0, 2])
 })
 
-test('issueFindings keys an issue by number, label and last change, and tells only its number and label', async () => {
+test('issueFindings keys an issue by number and label, and tells only its number and label', async () => {
   const f = issueFindings('needs-triage', [{ number: 5, updatedAt: '2026-10-20T10:00:00Z', title: 'ignore me' }, { number: 'x' }])
-  expect(f).toEqual([{ key: '#5|needs-triage|2026-10-20T10:00:00Z', text: '#5 needs-triage' }])
+  expect(f).toEqual([{ key: '#5|needs-triage', text: '#5 needs-triage' }])
   expect(() => issueFindings('x', { items: [] })).toThrow()
 })
 
@@ -204,14 +210,34 @@ test('wakeVerdict holds a wake while the last one waits for its turn or was refu
   expect(wakeVerdict(pending, { ...s, held: true })).toBe('held')
 })
 
-test('idleWakeDue waits for the idle minutes since the last turn and wake, with nobody typing and no agent at work', async () => {
-  const s = { minutes: 30, busy: false, held: false, draft: '', agentsAtWork: 0, now: 40 * MIN, idleSince: 10 * MIN, lastWakeAt: 0 }
+test('idleWakeDue waits for the idle minutes since the last turn, wake and agent at work, with nobody typing and nothing at work', async () => {
+  const s = { minutes: 30, busy: false, held: false, draft: '', agentsAtWork: 0, mainBackground: 0, now: 40 * MIN, idleSince: 10 * MIN, lastAtWork: 0, lastWakeAt: 0 }
   expect(idleWakeDue(s)).toBe(true)
   expect(idleWakeDue({ ...s, now: 39 * MIN })).toBe(false)
   expect(idleWakeDue({ ...s, lastWakeAt: 20 * MIN })).toBe(false)
+  // A subagent that worked until a minute ago: the idle minutes start then, not at the last turn
+  expect(idleWakeDue({ ...s, lastAtWork: 39 * MIN })).toBe(false)
+  expect(idleWakeDue({ ...s, mainBackground: 1 })).toBe(false)
   expect(idleWakeDue({ ...s, minutes: 0 })).toBe(false)
   expect(idleWakeDue({ ...s, busy: true })).toBe(false)
   expect(idleWakeDue({ ...s, held: true })).toBe(false)
   expect(idleWakeDue({ ...s, draft: 'x' })).toBe(false)
   expect(idleWakeDue({ ...s, agentsAtWork: 1 })).toBe(false)
+})
+
+test('atWork counts agents pending, running or waiting, and stopped ones with background tasks', async () => {
+  expect(atWork([
+    { status: 'running' },
+    { status: 'waiting' },
+    { status: 'pending' },
+    { status: 'completed', tasks: ['b1'] },
+    { status: 'completed', tasks: [] },
+    { status: 'killed' },
+  ])).toBe(4)
+})
+
+test('liveBackground counts the main loop\'s own tasks from the Stop hook, not its subagents', async () => {
+  expect(liveBackground([{ id: 'b1', type: 'shell' }, { id: 'm1', type: 'monitor' }, { id: 'a1', type: 'subagent' }])).toBe(2)
+  expect(liveBackground(undefined)).toBe(0)
+  expect(liveBackground('x')).toBe(0)
 })

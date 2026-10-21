@@ -39,8 +39,11 @@ run inside Claude Code (version 2.1.287 or later). See the
   meanwhile joins the next one. A finding still reported after it was told is not told again, unless its poller sets
   `remindMinutes` (default 0, off): then it is told again that long after, marked `(still reported)`, then after
   twice as long each time, at most every `remindMaxMinutes` (default 240). `watch.idleWakeMinutes` (default 0, off)
-  also wakes the model after that many idle minutes with nothing found, nobody typing and no subagent pending,
-  running or waiting, with `watch.idleWakeText` as the prompt (`{minutes}` stands for the minutes).
+  also wakes the model after that many idle minutes with nothing found, nobody typing and nothing at work: no
+  subagent pending, running, waiting or stopped with live background tasks, and none of the main loop's own
+  background tasks (shells, monitors) in flight when its last turn ended. The minutes count from the last turn's end,
+  the last wake and the last time a subagent was seen at work. `watch.idleWakeText` is the prompt (`{minutes}` stands
+  for the minutes).
 - **Commands.** `/tether-fleet` (the pane; `text` prints the table), `/tether-watch` (report and pane; `run`, `forget`, `reload`, `pane`),
   `/tether-guards` (text) and `/tether-checkpoint` (a checkpoint now). Pane commands say `(PANE)` in the command list. The names are prefixed with `tether-`
   because the plugin API takes only letters, digits, `_` and `-` in a command name (no `:`).
@@ -85,9 +88,12 @@ run inside Claude Code (version 2.1.287 or later). See the
   The model records an owner (`assign`, a few hours) or a known wait (`waive`, optionally for one cause) with the
   `mcp__tether__pr_owner` tool; an expired owner raises the problem again.
 - **Issues.** An `issues` poller tells each open issue on GitHub that carries one of its `labels` (read with `gh
-  issue list` in the poller's `cwd`, at most `limit`, default 100, per label; every `everySeconds`, default 120). An
-  issue is told once by its number and the label, never its title or body, and again when it changes (its
-  `updatedAt`) or comes back after losing the label. For example, to be woken for issues waiting for triage:
+  issue list` in the poller's `cwd`, every `everySeconds`, default 120). It reads at most `limit` issues per label
+  (default 100, at most 1000); issues past that are not seen, so keep a label's open issues under it. A label may not
+  contain a comma. An issue is told once by its number and the label, never its title or body, so a comment the woken
+  session writes does not wake it again; `remindMinutes` tells it again while it keeps the label, and one that loses
+  the label and gets it back after `forgetMinutes` is news again. For example, to be woken for issues waiting for
+  triage:
   `{ "id": "triage", "kind": "issues", "title": "Issues to triage", "labels": ["needs-triage"] }`.
 - **Agent guard.** A stopped subagent holding a big context (`fleet.bigContextTokens`, default 60k) loses its prompt
   cache `fleet.cacheTtlMinutes` (default 60) after its last request, and one with live background work (a
@@ -254,7 +260,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `watchStoreName` | `default` | Names this project seen-set in the store, so two projects keep their own. |
 | `watchStateFile` | (empty) | A file watch writes the boxes data to, for fleet to draw. Empty: none. |
 | `watchOpenOnStart` | `false` | Open the Tether pane, without taking focus, when a session starts or is cleared, while watch is on. Either option opens it once. |
-| `watchIdleWakeMinutes` | `0` | Wake the model after this many idle minutes with no subagent at work, though no poller found anything. 0: never. |
+| `watchIdleWakeMinutes` | `0` | Wake the model after this many idle minutes, though no poller found anything, while no subagent is at work (or stopped with background tasks) and the main loop has no background task of its own. 0: never. |
 | `watchIdleWakeText` | `Nothing new: woken after {minutes} idle minutes with no subagent at work. Take up the next piece of work, or say why there is none.` | The prompt of the idle wake; {minutes} stands for the idle minutes. |
 | `watchResendAfterMinutes` | `2` | A wake that started no turn while the session sat idle this long is sent again; a refused wake is tried again after this long or after the next turn starts. |
 | `watchPaneRows` | `0` | Rows for the Tether pane when fleet.pane sets none (kept for configs written for a separate Watch pane). 0: not set. |

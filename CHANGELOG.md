@@ -2,10 +2,11 @@
 
 ## 1.0.0-alpha.31
 
-- Added: an `issues` poller kind. It wakes the model for each open GitHub issue carrying one of its `labels`, once
-  per issue until the issue changes, naming only its number and the label.
+- Added: an `issues` poller kind. It wakes the model once for each open GitHub issue carrying one of its `labels`,
+  naming only its number and the label; `remindMinutes` tells it again while it waits.
 - Added: `watch.idleWakeMinutes` (option `watchIdleWakeMinutes`, default 0: off) wakes the model after that many
-  idle minutes with nothing found, nobody typing and no subagent at work; `watch.idleWakeText` is its prompt.
+  idle minutes with nothing found, nobody typing, no subagent at work (or stopped with background tasks) and no
+  background task of the main loop's own; `watch.idleWakeText` is its prompt.
 - Added: a poller's `remindMinutes` (default 0: off) tells a finding still reported again, marked `(still
   reported)`, twice as late each time, at most every `remindMaxMinutes` (default 240).
 - Fixed: a wake the engine refused (a `drop` answer: a hook's refusal, or a Stop standing after an interrupted turn)

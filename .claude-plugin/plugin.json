@@ -242,7 +242,7 @@
     "watchIdleWakeMinutes": {
       "type": "number",
       "title": "Idle wake (minutes)",
-      "description": "Wake the model after this many idle minutes with no subagent at work, though no poller found anything. 0: never.",
+      "description": "Wake the model after this many idle minutes, though no poller found anything, while no subagent is at work (or stopped with background tasks) and the main loop has no background task of its own. 0: never.",
       "default": 0
     },
     "watchIdleWakeText": {

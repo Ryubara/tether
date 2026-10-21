@@ -16,7 +16,7 @@ import { Boxes, parseState, type WatchState } from '../src/fleet/boxes'
 import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type IssuesPoller, type Poller, type WatchConfig } from '../src/watch/config'
 import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type WatchState as WatchStateData } from '../src/watch/boxes'
-import { agentFindings, fresh, idleWakeDue, issueFindings, readOutput, readPlainOutput, requeue, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen, type Told } from '../src/watch/findings'
+import { agentFindings, atWork, fresh, idleWakeDue, issueFindings, liveBackground, readOutput, readPlainOutput, requeue, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen, type Told } from '../src/watch/findings'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, withHandoffEnv, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, backedOff, continueText, describeCycle, forceCheckpoint, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
@@ -603,8 +603,10 @@ let awaiting: { at: number; pending: Pending[] } | undefined
 let heldUntil = 0
 /** The last refusal's reason, so each new reason is told once. */
 let refusal = ''
-/** Subagent states that count as at work: the idle wake waits for none of them. */
-const AT_WORK = new Set(['pending', 'running', 'waiting'])
+/** When a subagent was last seen at work: the idle wake counts its idle minutes from it too. */
+let lastAtWork = 0
+/** The main loop's own background tasks (shells, monitors) live at its last Stop: the idle wake waits for them. */
+let mainBackground = 0
 
 /** When each poller's next timed run starts (epoch ms), for the countdown. */
 const nextAt = new Map<string, number>()
@@ -682,7 +684,7 @@ async function issuesFindings($: any, p: IssuesPoller): Promise<{ findings?: Fin
   try {
     const findings: Finding[] = []
     for (const label of p.labels) {
-      const argv = ['gh', 'issue', 'list', '--state', 'open', '--label', label, '--limit', String(p.limit), '--json', 'number,updatedAt']
+      const argv = ['gh', 'issue', 'list', '--state', 'open', '--label', label, '--limit', String(p.limit), '--json', 'number']
       const r = await runChecked($, argv, { timeoutMs: p.timeoutMs, ...(p.cwd ? { cwd: p.cwd } : {}) })
       if (r.refused) return { error: r.refused }
       if (r.exitCode !== 0) {
@@ -774,14 +776,16 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
     const told = ((await $.store.get(toldKey())) ?? {}) as Told
     const next = fresh(seen, p, result.findings, now, told)
     await $.store.set(seenKey(), next.seen)
-    if (next.told !== told) await $.store.set(toldKey(), next.told)
+    // Written only when it changed, so a poll with nothing to remind does not write the store
+    if (JSON.stringify(next.told) !== JSON.stringify(told)) await $.store.set(toldKey(), next.told)
     lastRun.set(p.id, { at: now, ok: true, found: result.findings.length, told: next.fresh.length, ...(result.dropped ? { dropped: result.dropped } : {}) })
     if (next.fresh.length > 0) {
       await addLog($, p.id, now, next.fresh.map(f => f.text))
       $.ui.toast(`watch: ${next.fresh.length} new from ${title}`)
       if (p.wake) {
         const add = next.fresh.map(f => ({ ...f, poller: p.id, title, wake: true, at: now }))
-        await $.store.set(pendingKey(), [...(await getPending($)), ...add])
+        // A reminder for a finding still waiting to be told joins it, not a second copy
+        await $.store.set(pendingKey(), requeue(await getPending($), add))
       } else {
         for (const f of next.fresh) $.ui.log(`watch: ${title}: ${f.text}`)
       }
@@ -813,11 +817,14 @@ async function deliverOnce($: any): Promise<void> {
   if (awaiting && !busy && now - Math.max(awaiting.at, idleSince) >= wcfg.resendAfterMinutes * 60_000) {
     const lost = awaiting.pending
     awaiting = undefined
-    lastWakeAt = -Infinity
     if (lost.length > 0) await $.store.set(pendingKey(), requeue(lost, await getPending($)))
     $.ui.log('watch: the last wake started no turn; it is sent again')
   }
-  if (heldUntil && now >= heldUntil) heldUntil = 0
+  if (heldUntil && now >= heldUntil) {
+    heldUntil = 0
+    // The status line drops `wake refused` now, not at the next countdown tick (there may be none)
+    await status($)
+  }
   const held = awaiting !== undefined || heldUntil > 0
   const pending = await getPending($)
   if (pending.length === 0) return idleWake($, now, held)
@@ -834,16 +841,23 @@ async function deliverOnce($: any): Promise<void> {
 async function idleWake($: any, now: number, held: boolean): Promise<void> {
   // The cheap checks first, so an idle session with the option off reads nothing
   if (wcfg.idleWakeMinutes <= 0 || busy || held) return
-  if (now - Math.max(idleSince, lastWakeAt) < wcfg.idleWakeMinutes * 60_000) return
-  let atWork = 0
+  if (now - Math.max(idleSince, lastWakeAt, lastAtWork) < wcfg.idleWakeMinutes * 60_000) return
+  let working = 0
   try {
-    atWork = (((await $.agent.list()) ?? []) as Array<{ status: string }>).filter(a => AT_WORK.has(a.status)).length
+    // An agent that has stopped but still has background tasks (a build it waits on) counts as at work
+    working = atWork(await agentsSeen($, now))
   } catch {
     // An agent list that cannot be read is no reason to wake
     return
   }
+  if (working > 0) {
+    // Its work ending is no idle time: the minutes count again from the last time it was seen at work
+    lastAtWork = now
+    return
+  }
   const draft = (await $.prompt.read())?.text ?? ''
-  if (!idleWakeDue({ minutes: wcfg.idleWakeMinutes, busy, held, draft, agentsAtWork: atWork, now, idleSince, lastWakeAt })) return
+  const state = { minutes: wcfg.idleWakeMinutes, busy, held, draft, agentsAtWork: working, mainBackground, now, idleSince, lastAtWork, lastWakeAt }
+  if (!idleWakeDue(state)) return
   await submitWake($, now, wcfg.idleWakeText.split('{minutes}').join(String(wcfg.idleWakeMinutes)), [])
   await status($)
 }
@@ -1043,6 +1057,9 @@ const watchComplete = async ($: any, e: any, next: any): Promise<any> => {
     busy = false
     idleSince = await $.clock.now()
     void deliver($)
+  } else {
+    // A subagent's turn ending is work: the idle wake counts its minutes from here
+    lastAtWork = await $.clock.now()
   }
   return r
 }
@@ -1052,6 +1069,8 @@ async function* watchStep($: any, e: any, next: any): any {
   const id = (e as any).agentId
   const u = result?.usage
   if (id && typeof (e as any).model === 'string') agentModels.set(id, (e as any).model)
+  // Each request of a subagent is work, so the idle wake counts its minutes from the last one
+  if (id) lastAtWork = await $.clock.now()
   if (id && u) {
     const context = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
     steps.set(id, { at: await $.clock.now(), context })
@@ -1063,7 +1082,9 @@ const registerWatch: Register = (on) => {
 
   // Only the main loop's turns make the session busy; subagents run beside an idle session.
   on('turn.start', async ($, e, next) => {
-    // A subagent's turn leaves the session free; a main-loop turn takes in the wake sent and lifts a refusal's hold
+    // A subagent's turn leaves the session free; a main-loop turn takes in the wake sent and lifts a refusal's hold.
+    // Any main-loop turn counts, the person's too: a wake submitted while they start one is taken in by their turn
+    // or the next, so it is not resent. Telling the two apart would need the turn's prompt, which may be rewritten.
     if (!(e as any).agentId) {
       busy = true
       awaiting = undefined
@@ -2026,6 +2047,8 @@ export const register: Register = (on, opts) => {
   // `stop.maxBlocks` times in a row for the same reason.
   on('classic.Stop', async ($, e, next) => {
     const r: any = await next(e)
+    // The main loop's own background work in flight as its turn ends: the idle wake waits for it
+    mainBackground = liveBackground((e as any).background_tasks)
     // Without the guard tools nothing can clear the reason, so it never blocks
     if (!stopCfg.enabled || !gCfg.registerTools) return r
     const now = await $.clock.now()

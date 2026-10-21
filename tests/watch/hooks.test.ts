@@ -28,15 +28,16 @@ async function pickUp($: any, n: number) {
   await $.turn.complete({ turnId: `wake-${n}`, answer: '' } as any)
 }
 
-/** Starts watch with `config` as .claude/watch.json and the fake world's answers. */
-async function start($: any, on: any, config: unknown, world: World) {
+/** Starts watch with `config` as the file's watch section (`top` beside it) and the fake world's answers. */
+async function start($: any, on: any, config: unknown, world: World, top: Record<string, unknown> = {}) {
   const clock = mock.clock(on)
   mock.store(on)
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', () => ({ value: undefined }))
   on('tool.register', () => ({ value: { tool: 'x' } }))
   on('fs.exists', () => ({ value: true }))
-  on('fs.read', () => ({ value: JSON.stringify({ watch: config, housekeeping: { enabled: false }, conversations: { enabled: false } }) }))
+  on('fs.read', () => ({ value: JSON.stringify({ ...top, watch: config, housekeeping: { enabled: false }, conversations: { enabled: false } }) }))
+  on('classic.Stop', () => ({}))
   on('process.run', ($: any, e: any) => {
     world.argv.push([...e.argv])
     const r = world.runs.length > 1 ? world.runs.shift()! : world.runs[0]!
@@ -237,19 +238,43 @@ test('an agents poller with its own contextTokens ignores the subagent max conte
 const TRIAGE = { pollers: [{ id: 'triage', kind: 'issues', title: 'Issues to triage', labels: ['needs-triage'], everySeconds: 120 }] }
 const issue = (n: number, updatedAt: string) => ({ number: n, updatedAt, title: 'never told' })
 
-test('the issues poller wakes once per labelled issue, and again when the issue changes', { timeoutMs: 30_000 }, async ($, on) => {
+test('the issues poller wakes once per labelled issue, not again when the issue changes', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world(JSON.stringify([issue(5, '2026-10-20T10:00:00Z')]))
   const clock = await start($, on, TRIAGE, w)
   await clock.advance(3 * SEC)
-  expect(w.argv[0]).toEqual(['gh', 'issue', 'list', '--state', 'open', '--label', 'needs-triage', '--limit', '100', '--json', 'number,updatedAt'])
+  expect(w.argv[0]).toEqual(['gh', 'issue', 'list', '--state', 'open', '--label', 'needs-triage', '--limit', '100', '--json', 'number'])
   expect(w.submits).toEqual(['watch found something new. Handle it or say why it can wait:\n\nIssues to triage:\n- #5 needs-triage'])
   await clock.advance(2 * MIN)
   expect(w.submits.length).toBe(1)
-  // A change to the issue (a comment, an edit) makes it news again; its title is never told
-  w.runs = [{ exitCode: 0, stdout: JSON.stringify([issue(5, '2026-10-20T11:00:00Z')]) }]
+  // A change to the issue (the woken session's own comment) is no news; a new labelled issue is, and no title is told
+  w.runs = [{ exitCode: 0, stdout: JSON.stringify([issue(5, '2026-10-20T11:00:00Z'), issue(6, '2026-10-20T11:00:00Z')]) }]
   await clock.advance(2 * MIN)
   expect(w.submits.length).toBe(2)
+  expect(w.submits[1]).toMatch(/Issues to triage:\n- #6 needs-triage$/)
   expect(w.submits.join('\n')).not.toContain('never told')
+})
+
+test('an issues poller whose gh read fails or gives no list shows as failing and wakes no one', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world('', 1)
+  w.runs = [{ exitCode: 1, stdout: '', stderr: 'gh: not logged in' }]
+  const clock = await start($, on, TRIAGE, w)
+  await clock.advance(3 * SEC)
+  let report: any = await $.command.run({ command: 'tether-watch', args: '' } as any)
+  expect(report.text).toContain('FAILED 0 min ago: gh issue list: exit 1: gh: not logged in')
+  w.runs = [{ exitCode: 0, stdout: 'not json' }]
+  await clock.advance(2 * MIN)
+  report = await $.command.run({ command: 'tether-watch', args: '' } as any)
+  expect(report.text).toMatch(/- triage .*FAILED/)
+  expect(w.statuses.at(-1)).toContain('failing: triage')
+  expect(w.submits).toEqual([])
+})
+
+test('network false turns the issues poller off', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world('[]')
+  const clock = await start($, on, TRIAGE, w, { network: false })
+  await clock.advance(3 * MIN)
+  expect(w.argv.some(a => a[0] === 'gh')).toBe(false)
+  expect(w.logs).toContain('watch: triage is off (network is false)')
 })
 
 test('a wake the engine refuses is told once, and the findings are sent again after resendAfterMinutes', { timeoutMs: 30_000 }, async ($, on) => {
@@ -312,9 +337,43 @@ test('the idle wake goes after idleWakeMinutes with nothing found and no subagen
   w.agents = [{ id: 'a1', status: 'running', description: 'builder', type: 'general-purpose' }]
   await clock.advance(40 * MIN)
   expect(w.submits.length).toBe(1)
+  // The agent's turn ending is no idle time: the next idle wake is 30 minutes after it
   w.agents = [{ id: 'a1', status: 'completed', description: 'builder', type: 'general-purpose' }]
+  await $.turn.complete({ turnId: 'a', answer: 'done', agentId: 'a1' } as any)
   await clock.advance(10 * SEC)
+  expect(w.submits.length).toBe(1)
+  await clock.advance(29 * MIN)
+  expect(w.submits.length).toBe(1)
+  await clock.advance(2 * MIN)
   expect(w.submits.length).toBe(2)
+})
+
+test('the idle wake waits while you type, and none stacks behind one that started no turn', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world('')
+  w.draft = 'half typed'
+  const clock = await start($, on, { idleWakeMinutes: 30, pollers: [] }, w)
+  await clock.advance(40 * MIN)
+  expect(w.submits).toEqual([])
+  w.draft = ''
+  w.answer = 'no-turn'
+  await clock.advance(10 * SEC)
+  expect(w.submits.length).toBe(1)
+  // Taken but no turn: dropped after two idle minutes, and the next idle wake is 30 minutes after the last one
+  await clock.advance(29 * MIN)
+  expect(w.submits.length).toBe(1)
+  await clock.advance(2 * MIN)
+  expect(w.submits.length).toBe(2)
+})
+
+test('the idle wake waits while the main loop has background work of its own', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world('')
+  const clock = await start($, on, { idleWakeMinutes: 30, pollers: [] }, w)
+  await ($ as any).classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'build' }] })
+  await clock.advance(40 * MIN)
+  expect(w.submits).toEqual([])
+  await ($ as any).classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  await clock.advance(10 * SEC)
+  expect(w.submits.length).toBe(1)
 })
 
 test('the idle wake is off by default', { timeoutMs: 30_000 }, async ($, on) => {

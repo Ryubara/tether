@@ -199,12 +199,13 @@ export function fresh(
   return { fresh: out, seen: { ...seen, [poller.id]: mine }, told: nextTold }
 }
 
-/** One open issue as `gh issue list --json number,updatedAt` gives it. */
-export type IssueSeen = { number: number; updatedAt: string }
+/** One open issue as `gh issue list --json number` gives it. */
+export type IssueSeen = { number: number }
 
 /**
- * The issues poller's findings for one label: each open issue carrying it, keyed by number, label and last change
- * (so an issue that changes is told again), told by its number and the label only, never its title or body.
+ * The issues poller's findings for one label: each open issue carrying it, keyed by number and label (so the woken
+ * session's own comment does not wake it again; `remindMinutes` tells it again while it waits), told by its number
+ * and the label only, never its title or body.
  */
 export function issueFindings(label: string, issues: unknown): Finding[] {
   if (!Array.isArray(issues)) throw new Error('gh issue list did not give a list')
@@ -212,8 +213,7 @@ export function issueFindings(label: string, issues: unknown): Finding[] {
   for (const i of issues) {
     const n = (i as IssueSeen | null)?.number
     if (!Number.isInteger(n)) continue
-    const at = (i as IssueSeen).updatedAt
-    out.push({ key: `#${n}|${label}|${typeof at === 'string' ? at : ''}`, text: `#${n} ${label}` })
+    out.push({ key: `#${n}|${label}`, text: `#${n} ${label}` })
   }
   return out
 }
@@ -270,13 +270,44 @@ export function requeue(back: Pending[], now: Pending[]): Pending[] {
 }
 
 /** What decides whether the idle wake goes now; see idleWakeDue. */
-export type IdleState = { minutes: number; busy: boolean; held: boolean; draft: string; agentsAtWork: number; now: number; idleSince: number; lastWakeAt: number }
+export type IdleState = {
+  minutes: number
+  busy: boolean
+  held: boolean
+  draft: string
+  agentsAtWork: number
+  /** The main loop's own background tasks in flight. */
+  mainBackground: number
+  now: number
+  idleSince: number
+  /** When a subagent was last seen at work (0: never). */
+  lastAtWork: number
+  lastWakeAt: number
+}
 
 /**
- * Whether the idle wake goes now: it is on, no turn runs, no wake is held, nobody is typing, no subagent is at work,
- * and the session has sat `minutes` since its last turn ended and since the last wake.
+ * Whether the idle wake goes now: it is on, no turn runs, no wake is held, nobody is typing, no subagent and no
+ * background task of the main loop is at work, and the session has sat `minutes` since its last turn ended, since a
+ * subagent was last at work and since the last wake.
  */
 export function idleWakeDue(s: IdleState): boolean {
-  if (s.minutes <= 0 || s.busy || s.held || s.draft.trim() !== '' || s.agentsAtWork > 0) return false
-  return s.now - Math.max(s.idleSince, s.lastWakeAt) >= s.minutes * 60_000
+  if (s.minutes <= 0 || s.busy || s.held || s.draft.trim() !== '' || s.agentsAtWork > 0 || s.mainBackground > 0) return false
+  return s.now - Math.max(s.idleSince, s.lastAtWork, s.lastWakeAt) >= s.minutes * 60_000
+}
+
+/** Subagent states that count as at work. */
+const AT_WORK = new Set(['pending', 'running', 'waiting'])
+
+/** How many subagents are at work: pending, running or waiting, or stopped with live background tasks. */
+export function atWork(agents: Array<{ status: string; tasks?: string[] }>): number {
+  return agents.filter(a => AT_WORK.has(a.status) || (a.tasks?.length ?? 0) > 0).length
+}
+
+/**
+ * The main loop's own background tasks in flight, from the Stop hook's `background_tasks` (subagents are left out:
+ * the agent list counts them).
+ */
+export function liveBackground(tasks: unknown): number {
+  if (!Array.isArray(tasks)) return 0
+  return tasks.filter(t => t !== null && typeof t === 'object' && (t as { type?: unknown }).type !== 'subagent').length
 }
