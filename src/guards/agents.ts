@@ -26,6 +26,11 @@ export type AgentRules = {
 export type AutoRules = {
   /** At least this context: hand over instead of keeping warm. */
   handoverTokens: number
+  /**
+   * Past this context (`fleet.retireContextTokens`, with `cacheGuard.sizeHandover` on) a stopped agent with background
+   * work is asked to hand over at once, whatever its idle time; absent: off.
+   */
+  retireTokens?: number
   /** Minutes the agent gets for its handover before the coordinator is alerted. */
   handoverWaitMinutes: number
   /** Keep-warm messages to one agent (in a row, with no real work between) before the coordinator is alerted. */
@@ -125,14 +130,31 @@ export function alerted(a: AgentAction | undefined, kind: AlertKind, since: numb
   return t !== undefined && t >= since
 }
 
+/** How long the guard waits after a failed message to an agent before sending it another. */
+export const SEND_BACKOFF_MS = 5 * MIN
+
+/** Whether a message to the agent failed so recently that the next one waits. */
+function backingOff(act: { sendFailedAt?: number } | undefined, now: number): boolean {
+  return act?.sendFailedAt !== undefined && now - act.sendFailedAt < SEND_BACKOFF_MS
+}
+
+/** Whether the agent was decided for good (retired or done): nothing more is done for it. */
+function final(store: GuardStore, id: string): boolean {
+  const d = Object.hasOwn(store.decisions, id) ? store.decisions[id] : undefined
+  return d !== undefined && d.decision !== 'kept-warm'
+}
+
 /**
  * Whether a decision still covers an agent now. Retired and done are final. Kept-warm lasts one expiry window,
- * measured from the later of the agent's last activity and the record (the ping refreshes the activity).
+ * measured from the later of the agent's last activity and the record (the ping refreshes the activity), and never
+ * covers a handover asked after it: a kept-warm record ends the handover before it, not one that came later.
  */
 function covered(store: GuardStore, a: StoppedCandidate, rules: AgentRules, now: number): boolean {
   const d = Object.hasOwn(store.decisions, a.id) ? store.decisions[a.id] : undefined
   if (!d) return false
   if (d.decision !== 'kept-warm') return true
+  const asked = store.actions[a.id]?.handoverAt
+  if (asked !== undefined && asked >= d.atMs) return false
   return now - Math.max(a.lastStepAt, d.atMs) < actAfterMinutes(rules) * MIN
 }
 
@@ -175,7 +197,8 @@ export function stopReason(items: Undecided[]): string {
     '(a) keep it warm: send it a short message with SendMessage (a cache read re-arms the expiry), then record it as kept-warm; do this only for an agent on the same model as this session (a message wakes an agent whose Agent call pinned no model on the session model, and that writes a new cache at the session model rates); ' +
     '(b) hand it over and stop it: ask it to write its status and stop, TaskStop its background tasks, hand the wait to a fresh agent, ' +
     'then record it as retired (or done, when its work is finished). All with the mcp__tether__agent_decision tool (load it with ToolSearch if it is deferred); ' +
-    'retired and done are refused while the agent runs or has live background tasks.\n' +
+    'retired and done are refused while the agent runs or has live background tasks. ' +
+    'An agent past the subagent max context is asked to hand over by Tether itself at its next stop; recording it kept-warm after that keeps it past the line, and Tether does not ask again.\n' +
     items.map(i => `- ${i.text}`).join('\n')
   )
 }
@@ -199,7 +222,17 @@ export function decisionProblem(decision: string, agent: Pick<StoppedCandidate, 
 /** One thing Tether does by itself for a stopped agent. */
 export type Plan =
   | { kind: 'warm'; id: string; label: string; count: number; contextTokens: number }
-  | { kind: 'handover'; id: string; label: string; contextTokens: number; /** Why a handover and not a ping: the context is big, or a wake would switch the agent's model. */ why: 'size' | 'model'; model?: string }
+  | {
+      kind: 'handover'
+      id: string
+      label: string
+      contextTokens: number
+      /** Why: the context is big near expiry (`size`), a wake would switch the agent's model (`model`), or it passed the retire line (`retire`). */
+      why: 'size' | 'model' | 'retire'
+      model?: string
+      /** A `retire` handover to an agent whose wake would switch it to the session's model (the message writes one new cache). */
+      otherModel?: boolean
+    }
   | { kind: 'collect'; id: string; label: string; tasks: string[] }
   | { kind: 'retire'; id: string; label: string; stopped: number }
   | { kind: 'alert'; id: string; label: string; key: AlertKind; /** The alert is told once until the agent has done something after this time. */ since: number; text: string }
@@ -219,6 +252,8 @@ const SETTLE_MS = 45_000
  * - A stopped agent with background work, past the act-after time and big enough to matter, is handed over when
  *   its context reaches `handoverTokens` or a message would switch its model, and kept warm otherwise (an alert once
  *   `keepWarmMax` pings were sent with no real work between).
+ * - A stopped agent with background work whose context has passed `retireTokens` is handed over at once, at its
+ *   first stop seen, while its cache is still warm: waiting for the act-after time would let it grow on.
  * - A stopped agent with no background work cannot wake itself, so it is left to the model's decision.
  * The plans are ordered so the messages (cache-critical) come before the task stops.
  */
@@ -253,15 +288,26 @@ export function planActions(agents: StoppedCandidate[], store: GuardStore, rules
       }
       continue
     }
-    if (!STOPPED.has(a.status) || covered(store, a, rules, now) || !hasBackground(a)) continue
+    if (!STOPPED.has(a.status) || !hasBackground(a) || final(store, a.id)) continue
     const idle = (now - a.lastStepAt) / MIN
     const context = a.contextTokens ?? 0
+    // Past the retire line: asked now, at its stop, while the message is still a cache read. Tether's own kept-warm
+    // pings do not hold it back; the coordinator's kept-warm after the ask (retireKept) does, as that is its call
+    if (auto.retireTokens !== undefined && context >= auto.retireTokens && idle < rules.cacheMinutes && act?.handoverAt === undefined && act?.retireKept === undefined) {
+      if (!backingOff(act, now)) {
+        out.push({ kind: 'handover', id: a.id, label: a.label, contextTokens: context, why: 'retire', ...(a.model ? { model: a.model } : {}), ...(!wakeKeepsModel(a, auto.sessionModel) ? { otherModel: true } : {}) })
+      }
+      continue
+    }
+    if (covered(store, a, rules, now)) continue
     if (idle < actAfterMinutes(rules) || context < rules.smallTokens) continue
     // Real work since the last ping starts a new run of pings
     const warms = act?.warmContext !== undefined && context - act.warmContext >= WORK_TOKENS ? 0 : (act?.warms ?? 0)
     if (idle >= rules.cacheMinutes) {
       // Too late: a message now would itself re-write the whole context, so the model decides
       if (!alerted(act, 'expired', a.lastStepAt)) out.push({ kind: 'alert', id: a.id, label: a.label, key: 'expired', since: a.lastStepAt, text: `${a.label} (${a.id}) has background work and its cache EXPIRED ${Math.floor(idle)} min after its last request; Tether did not ping it (that would re-write ~${Math.round(context / 1000)}k tokens). Decide whether to hand it over.` })
+    } else if (backingOff(act, now)) {
+      // The last message failed a moment ago: wait before the next try rather than send every tick
     } else if (context >= auto.handoverTokens || !wakeKeepsModel(a, auto.sessionModel)) {
       out.push({ kind: 'handover', id: a.id, label: a.label, contextTokens: context, why: context >= auto.handoverTokens ? 'size' : 'model', ...(a.model ? { model: a.model } : {}) })
     } else if (warms >= auto.keepWarmMax) {

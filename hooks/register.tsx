@@ -1466,6 +1466,12 @@ function failedOnce($: any, id: string, text: string): void {
   $.ui.log(`agent guard: ${text}`)
 }
 
+/** A message to an agent failed: said once per reason, and the next message waits (no resend every tick). */
+async function sendFailed($: any, id: string, now: number, text: string): Promise<void> {
+  failedOnce($, id, text)
+  await updateGuardStore($, s => recordAction(s, id, { sendFailedAt: now }))
+}
+
 /** The engine's current word on one agent (a fresh $.agent.list), or undefined when it cannot be read. */
 async function agentNow($: any, id: string): Promise<{ status: string } | undefined> {
   try {
@@ -1480,14 +1486,21 @@ async function runPlan($: any, plan: Plan, now: number): Promise<void> {
   const at = localStamp(now).replace('T', ' ').slice(0, 16)
   if (plan.kind === 'warm') {
     const sent = await sendToAgent($, plan.id, gCfg.keepWarmText)
-    if (!sent.ok) return failedOnce($, plan.id, plain() ? `keep-warm of ${plan.id} failed` : `keep-warm of ${plan.label} (${plan.id}) failed: ${sent.reason}`)
-    await updateGuardStore($, s => recordAction(recordDecision(s, plan.id, 'kept-warm', `Tether pinged it (${plan.count})`, at, now), plan.id, { ...NEW_CYCLE, warms: plan.count, warmContext: plan.contextTokens }))
+    if (!sent.ok) return sendFailed($, plan.id, now, plain() ? `keep-warm of ${plan.id} failed` : `keep-warm of ${plan.label} (${plan.id}) failed: ${sent.reason}`)
+    await updateGuardStore($, s => recordAction(recordDecision(s, plan.id, 'kept-warm', `Tether pinged it (${plan.count})`, at, now), plan.id, { ...NEW_CYCLE, warms: plan.count, warmContext: plan.contextTokens, sendFailedAt: undefined }))
     await reportGuard($, `kept ${plan.label} (${plan.id}) warm (ping ${plan.count}); its background work goes on`, now)
   } else if (plan.kind === 'handover') {
     const sent = await sendToAgent($, plan.id, gCfg.handoverText)
-    if (!sent.ok) return failedOnce($, plan.id, plain() ? `handover request to ${plan.id} failed` : `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`)
-    await updateGuardStore($, s => recordAction(s, plan.id, { ...NEW_CYCLE, warms: 0, handoverAt: now }))
-    const why = plan.why === 'model' ? `; it runs on ${plain() ? 'another model' : plan.model ?? 'an unknown model'}, so a ping would wake it on the session's model and write a new cache` : ''
+    if (!sent.ok) return sendFailed($, plan.id, now, plain() ? `handover request to ${plan.id} failed` : `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`)
+    await updateGuardStore($, s => recordAction(s, plan.id, { ...NEW_CYCLE, warms: 0, handoverAt: now, sendFailedAt: undefined }))
+    const runsOn = plain() ? 'another model' : plan.model ?? 'an unknown model'
+    const why =
+      plan.why === 'model'
+        ? `; it runs on ${runsOn}, so a ping would wake it on the session's model and write a new cache`
+        : plan.why === 'retire'
+          ? `; its context is past the ${tokens(cfg.retireContextTokens)} retire line (fleet.retireContextTokens)` +
+            (plan.otherModel ? `; it runs on ${runsOn}, so this message wakes it on the session's model and writes one new cache` : '')
+          : ''
     await reportGuard($, `asked ${plan.label} (${plan.id}, ${tokens(plan.contextTokens)} context) to hand over and stop${why}; its background tasks are stopped once it has`, now)
   } else if (plan.kind === 'collect') {
     // The plan is a few seconds old: look again before stopping anything, as a finishing task may have woken the agent
@@ -1551,7 +1564,14 @@ async function guardTick($: any): Promise<void> {
       } catch {
         // Unknown: no agent is then proven safe to ping unless its Agent call pinned a model
       }
-      const auto = { handoverTokens: gCfg.handoverTokens, handoverWaitMinutes: gCfg.handoverWaitMinutes, keepWarmMax: gCfg.keepWarmMax, ...(sessionModel ? { sessionModel } : {}) }
+      // The retire line is fleet's one subagent max context, so the pane's flag, the poller's wake and this handover agree
+      const auto = {
+        handoverTokens: gCfg.handoverTokens,
+        handoverWaitMinutes: gCfg.handoverWaitMinutes,
+        keepWarmMax: gCfg.keepWarmMax,
+        ...(sessionModel ? { sessionModel } : {}),
+        ...(gCfg.sizeHandover ? { retireTokens: cfg.retireContextTokens } : {}),
+      }
       const plans = planActions(seen, store, agentRules(), auto, now)
       const safely = (plan: Plan) => runPlan($, plan, now).catch(err => failedOnce($, plan.id, plain() ? `${plan.kind} of ${plan.id} failed` : `${plan.kind} of ${plan.label} (${plan.id}) failed: ${err}`))
       await Promise.all(plans.filter(x => x.kind === 'warm' || x.kind === 'handover').map(safely))
@@ -1722,8 +1742,16 @@ async function agentDecisionCall($: any, e: any): Promise<any> {
   const key = known?.id ?? id
   await updateGuardStore($, s => {
     const recorded = recordDecision(s, key, e.decision, plain() ? '' : String(e.note ?? ''), localStamp(now).replace('T', ' ').slice(0, 16), now)
-    // Kept-warm is a new cycle: an earlier handover (late, or failed) no longer applies to an agent that goes on working
-    return e.decision === 'kept-warm' ? recordAction(recorded, key, { ...NEW_CYCLE, warms: (s.actions[key]?.warms ?? 0) + 1, ...(known?.contextTokens !== undefined ? { warmContext: known.contextTokens } : {}) }) : recorded
+    if (e.decision !== 'kept-warm') return recorded
+    // Kept-warm is a new cycle: an earlier handover (late, or failed) no longer applies to an agent that goes on working.
+    // After a handover request, or past the retire line, it is the coordinator keeping the agent: the size handover stops asking
+    const pastLine = s.actions[key]?.handoverAt !== undefined || (known?.contextTokens !== undefined && known.contextTokens >= cfg.retireContextTokens)
+    return recordAction(recorded, key, {
+      ...NEW_CYCLE,
+      warms: (s.actions[key]?.warms ?? 0) + 1,
+      ...(known?.contextTokens !== undefined ? { warmContext: known.contextTokens } : {}),
+      ...(pastLine ? { retireKept: now } : {}),
+    })
   })
   await refreshUndecided($).catch(() => lastUndecided)
   return toolText(`${id} recorded as ${e.decision}.`)

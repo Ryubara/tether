@@ -168,7 +168,8 @@ test('a waiting agent under the handover size is kept warm 20 minutes before its
 })
 
 test('a waiting agent over the handover size is asked to hand over; its tasks are stopped only after it has stopped, then it is retired', { timeoutMs: 30_000 }, async ($, on) => {
-  const w = world({ transcript: started('bt1') + '\n' + started('bt2') + '\n' + ended('bt1'), context: 300_000 })
+  // Over handoverTokens (250k) but under the retire line (300k), which would ask at once
+  const w = world({ transcript: started('bt1') + '\n' + started('bt2') + '\n' + ended('bt1'), context: 280_000 })
   const clock = await start($, on, CFG, w)
   await step($)
   await clock.advance(41 * MIN)
@@ -507,4 +508,85 @@ test('tasks seen in a small transcript are kept when it grows past the read limi
   const deny = ((await decide($, 'retired')) as any).deny as string
   expect(deny).toContain('bt1')
   expect(deny).not.toContain('fake9')
+})
+
+test('an agent that grew past fleet.retireContextTokens is asked to hand over at its next stop, and not with sizeHandover off', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 466_000 })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  // It has just stopped on a build wait: the request goes on the next tick, not 40 minutes later
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+  expect(w.toasts.some(t => t.includes('past the 300k retire line'))).toBe(true)
+  // Asked once: the handover runs its course, no second request
+  await clock.advance(3 * MIN)
+  expect(w.sent.length).toBe(1)
+  // It stops after the request: its leftover task is stopped
+  await step($)
+  await $.turn.complete({ turnId: 't', answer: 'handed over', agentId: 'a1' } as any)
+  w.agents[0]!.status = 'completed'
+  await clock.advance(1 * MIN)
+  expect(w.stopped).toEqual(['bt1'])
+})
+
+test('with cacheGuard.sizeHandover off a big agent waits for the act-after time as before', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 466_000 })
+  const clock = await start($, on, { ...CFG, cacheGuard: { sizeHandover: false } }, w)
+  await step($)
+  await clock.advance(30 * MIN)
+  expect(w.sent).toEqual([])
+  await clock.advance(11 * MIN)
+  expect(w.sent.length).toBe(1)
+  expect(w.toasts.some(t => t.includes('retire line'))).toBe(false)
+})
+
+test('a big agent the coordinator records kept-warm after the size handover request is not asked again at its next stop', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 466_000 })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+  // The coordinator decides to keep it: its call
+  expect((await decide($, 'kept-warm')).deny).toBeUndefined()
+  // The agent goes on working and stops again on its build
+  await step($)
+  await $.turn.complete({ turnId: 't', answer: 'waiting on the build', agentId: 'a1' } as any)
+  await clock.advance(5 * MIN)
+  expect(w.sent.length).toBe(1)
+  expect(w.stopped).toEqual([])
+})
+
+test('a handover after an older kept-warm record is collected once the agent stops', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 466_000 })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  // An earlier kept-warm, recorded before the agent passed the line (Tether had not asked it anything yet)
+  w.context = 200_000
+  await step($)
+  expect((await decide($, 'kept-warm')).deny).toBeUndefined()
+  w.context = 466_000
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+  await step($)
+  await $.turn.complete({ turnId: 't', answer: 'handed over', agentId: 'a1' } as any)
+  w.agents[0]!.status = 'completed'
+  await clock.advance(1 * MIN)
+  expect(w.stopped).toEqual(['bt1'])
+})
+
+test('a failed message is not resent every tick: the next try waits a few minutes', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 466_000, delivery: { isDelivered: false, reason: 'gone' } })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  await clock.advance(3 * MIN)
+  expect(w.sent.length).toBe(1)
+  await clock.advance(3 * MIN)
+  expect(w.sent.length).toBe(2)
+  expect(w.logs.filter(l => l.includes('handover request to worker (a1) failed')).length).toBe(1)
 })

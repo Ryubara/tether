@@ -352,3 +352,53 @@ test('the cold guard refuses a decided agent but not a kept-warm one', async () 
   expect(coldGuard(input, agents, ledger, NOW, DEFAULTS, new Map(), recordDecision(EMPTY_STORE, 'a1', 'kept-warm', '', 't', NOW).decisions)).toBeUndefined()
   expect(coldGuard(input, agents, ledger, NOW, DEFAULTS, new Map(), recordDecision(EMPTY_STORE, 'a1', 'retired', '', 't', NOW).decisions)).toContain('decided retired')
 })
+
+test('an agent past the retire size is asked to hand over at its next stop, long before its cache runs out', async () => {
+  const auto = { ...AUTO, retireTokens: 300_000 }
+  const run = (agents: StoppedCandidate[], store = EMPTY_STORE, a = auto) => planActions(agents, store, RULES_30, a, NOW).map(p => `${p.kind}:${p.id}${p.kind === 'handover' ? ':' + p.why : ''}`)
+  // Just stopped (1 min idle) with a build running: handed over now, not 40 minutes later
+  expect(run([waiting('big', 1, 466_000)])).toEqual(['handover:big:retire'])
+  // Under the size, or still running, or with nothing that wakes it: left alone
+  expect(run([waiting('small', 1, 299_000), waiting('busy', 1, 466_000, { status: 'running' }), waiting('done', 1, 466_000, { status: 'completed', tasks: [] })])).toEqual([])
+  // Off (no retireTokens): the old rule, nothing before the act-after time
+  expect(run([waiting('big', 1, 466_000)], EMPTY_STORE, AUTO)).toEqual([])
+  // A kept-warm record does not hold it back; a retired or done one does
+  expect(run([waiting('big', 1, 466_000)], recordDecision(EMPTY_STORE, 'big', 'kept-warm', '', 't', NOW - 2 * MIN))).toEqual(['handover:big:retire'])
+  expect(run([waiting('big', 1, 466_000)], recordDecision(EMPTY_STORE, 'big', 'retired', '', 't', NOW - 2 * MIN))).toEqual([])
+  // Asked already and since stopped, with a kept-warm newer than the ask (an older store): the handover block skips it
+  // (covered), and the retire rule must not ask it a second time
+  const askedThenKept = recordDecision(recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 3 * MIN }), 'big', 'kept-warm', '', 't', NOW - 2 * MIN)
+  expect(run([waiting('big', 0.5, 466_000, { finishedAt: NOW - 20_000, lastStepAt: NOW - 30_000 })], askedThenKept)).toEqual([])
+  // The coordinator kept it past the line (retireKept): its call, never asked again
+  expect(run([waiting('big', 1, 466_000)], recordAction(EMPTY_STORE, 'big', { retireKept: NOW - 10 * MIN }))).toEqual([])
+  // A message that failed a moment ago waits SEND_BACKOFF_MS before the next try; a warm ping too
+  const failed = recordAction(EMPTY_STORE, 'big', { sendFailedAt: NOW - 2 * MIN })
+  expect(run([waiting('big', 1, 466_000)], failed)).toEqual([])
+  expect(planActions([waiting('big', 1, 466_000)], failed, RULES_30, auto, NOW + 3 * MIN + 1).map(p => p.kind)).toEqual(['handover'])
+  expect(planActions([waiting('small', 41, 100_000)], recordAction(EMPTY_STORE, 'small', { sendFailedAt: NOW - MIN }), RULES_30, auto, NOW)).toEqual([])
+  // An agent on another model is still asked, flagged so the message says it writes one new cache
+  expect(planActions([waiting('big', 1, 466_000, { model: 'claude-sonnet-5-5' })], EMPTY_STORE, RULES_30, auto, NOW)).toMatchObject([{ kind: 'handover', why: 'retire', otherModel: true }])
+  expect(planActions([waiting('big', 1, 466_000)], EMPTY_STORE, RULES_30, auto, NOW)[0]).not.toHaveProperty('otherModel')
+  expect(readStore(JSON.parse(JSON.stringify(recordAction(failed, 'big', { retireKept: NOW })))).actions['big']).toMatchObject({ sendFailedAt: NOW - 2 * MIN, retireKept: NOW })
+  // An expired cache is never messaged (the message would be the re-write): the old alert
+  expect(run([waiting('big', 65, 466_000)])).toEqual(['alert:big'])
+})
+
+test('a handover asked after an older kept-warm record still runs: collected at the stop, late alerts told', async () => {
+  // Kept warm long ago, then asked to hand over; the agent has since worked and stopped, so its activity is fresh
+  const kept = recordDecision(EMPTY_STORE, 'big', 'kept-warm', 'pinged', 't', NOW - 50 * MIN)
+  const asked = recordAction(kept, 'big', { handoverAt: NOW - 3 * MIN })
+  const done = waiting('big', 0.5, 470_000, { finishedAt: NOW - 20_000, lastStepAt: NOW - 30_000, tasks: ['t1'] })
+  expect(planActions([done], asked, RULES_30, AUTO, NOW)).toEqual([{ kind: 'collect', id: 'big', label: 'big', tasks: ['t1'] }])
+  const late = recordAlert(recordAction(kept, 'big', { handoverAt: NOW - 11 * MIN }), 'big', 'handover-late', NOW)
+  expect(undecided([waiting('big', 0.5, 470_000, { status: 'running' })], late, RULES_30, NOW)[0]?.text).toContain('NOT stopped')
+  // A kept-warm recorded after the ask ends the handover (the tool clears handoverAt, but an older store may not have)
+  const after = recordDecision(recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 3 * MIN }), 'big', 'kept-warm', '', 't', NOW - MIN)
+  expect(planActions([done], after, RULES_30, AUTO, NOW)).toEqual([])
+})
+
+test('cacheGuard.sizeHandover is on by default and can be turned off', async () => {
+  expect(CACHE_GUARD_DEFAULTS.sizeHandover).toBe(true)
+  expect(mergeCacheGuard({ sizeHandover: false }).sizeHandover).toBe(false)
+  expect(mergeCacheGuard({ sizeHandover: 'no' }).sizeHandover).toBe(true)
+})
