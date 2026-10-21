@@ -7,6 +7,8 @@ const SEC = 1000
 const MIN = 60 * SEC
 
 type World = {
+  /** How the engine answers a wake: absent, it takes it and a turn starts; `no-turn`, it takes it and no turn starts; any other text, it drops it with that reason. */
+  answer?: string
   agents: Array<{ id: string; status: string; description: string; type: string; name?: string }>
   /** The transcript of agent a1 (path suffix /s1/subagents/agent-a1.jsonl). */
   transcript: string
@@ -59,6 +61,12 @@ const started = (id: string) =>
 const ended = (id: string, status = 'completed') =>
   JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n</task-notification>` } })
 
+/** The turn the engine runs for a wake it took: a main-loop turn, started and completed. */
+async function pickUp($: any, n: number) {
+  await $.turn.start({ text: '', turnId: `wake-${n}` } as any)
+  await $.turn.complete({ turnId: `wake-${n}`, answer: '' } as any)
+}
+
 /** Starts Tether with `config` as the project file and the fake world's answers. */
 async function start($: any, on: any, config: unknown, w: World) {
   const clock = mock.clock(on)
@@ -89,8 +97,11 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('process.run', () => ({ value: { stdout: '', stderr: '', exitCode: 1 } }))
   on('agent.list', () => ({ value: w.agents }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
-  on('prompt.submit', ($: any, e: any) => {
+  on('prompt.submit', (_: any, e: any) => {
     w.submits.push(e.text)
+    // The engine starts a turn for a prompt it takes, once the session is idle: a wake is picked up
+    if (w.answer === undefined) void Promise.resolve().then(() => pickUp($, w.submits.length))
+    else if (w.answer !== 'no-turn') return { drop: w.answer }
     return { text: e.text, origin: e.origin }
   })
   // The engine spells a plugin's `{ agentId }` address as the agent's id before the hook sees it (SessionSendInput.to is a string)

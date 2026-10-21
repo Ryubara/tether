@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.0-alpha.31
+
+- Added: an `issues` poller kind. It wakes the model once for each open GitHub issue carrying one of its `labels`,
+  naming only its number and the label; `remindMinutes` tells it again while it waits.
+- Added: `watch.idleWakeMinutes` (option `watchIdleWakeMinutes`, default 0: off) wakes the model after that many
+  idle minutes with nothing found, nobody typing, no subagent at work (or stopped with background tasks) and no
+  background task of the main loop's own; `watch.idleWakeText` is its prompt.
+- Added: a poller's `remindMinutes` (default 0: off) tells a finding still reported again, marked `(still
+  reported)`, twice as late each time, at most every `remindMaxMinutes` (default 240).
+- Fixed: a wake the engine refused (a `drop` answer: a hook's refusal, or a Stop standing after an interrupted turn)
+  was taken as delivered and its findings were lost. It is now told once, and tried again after
+  `watch.resendAfterMinutes` (option `watchResendAfterMinutes`, default 2) or when the next turn starts.
+- Fixed: a wake taken that started no turn was never sent again; it is now, once the session sat idle
+  `resendAfterMinutes`, and no second wake stacks behind one still waiting for its turn.
+- Fixed: a subagent's turn start marked the session busy, holding every wake until the next main-loop turn ended.
+
 ## 1.0.0-alpha.30
 
 - Added: `cacheGuard.sizeHandover` (option `cacheGuardSizeHandover`, default on). A stopped subagent with live
