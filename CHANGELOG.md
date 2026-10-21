@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.0-alpha.30
+
+- Added: `cacheGuard.sizeHandover` (option `cacheGuardSizeHandover`, default on). A stopped subagent with live
+  background work whose context has passed `fleet.retireContextTokens` is asked to hand over at the first tick after
+  it stops, not only near its cache's expiry, then goes through the usual steps (leftover tasks stopped, retired once
+  quiet, an alert when late). A busy agent that stops between build waits every few minutes was never idle long
+  enough for the old rule, so it grew on (466k measured) with no request.
+- Fixed: a task the agent stopped itself with `TaskStop` stayed live for good, because no task-notification follows
+  that stop; the answer ("Successfully stopped task: <id>") now ends it. Such a ghost task kept an agent counted as
+  having background work and made `agent_decision` refuse to record it retired or done.
+- Fixed: a command moved to the background by its timeout ("did not complete within its Ns timeout and was moved to
+  the background") or by the user was not seen as a task in an appended row, the only source once an agent's
+  transcript passes 4 MB, so a big agent's builds could go unseen.
+- Fixed: an older kept-warm record hid a handover asked after it. Once the agent stopped, its leftover tasks were
+  not collected and a late handover was not told, for up to a whole cache window.
+
 ## 1.0.0-alpha.29
 
 - Added: the `TETHER_HANDOFF_FILE` environment variable names a session's handoff file, relative to its folder, over

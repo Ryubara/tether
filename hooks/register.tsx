@@ -1487,7 +1487,12 @@ async function runPlan($: any, plan: Plan, now: number): Promise<void> {
     const sent = await sendToAgent($, plan.id, gCfg.handoverText)
     if (!sent.ok) return failedOnce($, plan.id, plain() ? `handover request to ${plan.id} failed` : `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`)
     await updateGuardStore($, s => recordAction(s, plan.id, { ...NEW_CYCLE, warms: 0, handoverAt: now }))
-    const why = plan.why === 'model' ? `; it runs on ${plain() ? 'another model' : plan.model ?? 'an unknown model'}, so a ping would wake it on the session's model and write a new cache` : ''
+    const why =
+      plan.why === 'model'
+        ? `; it runs on ${plain() ? 'another model' : plan.model ?? 'an unknown model'}, so a ping would wake it on the session's model and write a new cache`
+        : plan.why === 'retire'
+          ? `; its context is past the ${tokens(cfg.retireContextTokens)} retire line (fleet.retireContextTokens)`
+          : ''
     await reportGuard($, `asked ${plan.label} (${plan.id}, ${tokens(plan.contextTokens)} context) to hand over and stop${why}; its background tasks are stopped once it has`, now)
   } else if (plan.kind === 'collect') {
     // The plan is a few seconds old: look again before stopping anything, as a finishing task may have woken the agent
@@ -1551,7 +1556,14 @@ async function guardTick($: any): Promise<void> {
       } catch {
         // Unknown: no agent is then proven safe to ping unless its Agent call pinned a model
       }
-      const auto = { handoverTokens: gCfg.handoverTokens, handoverWaitMinutes: gCfg.handoverWaitMinutes, keepWarmMax: gCfg.keepWarmMax, ...(sessionModel ? { sessionModel } : {}) }
+      // The retire line is fleet's one subagent max context, so the pane's flag, the poller's wake and this handover agree
+      const auto = {
+        handoverTokens: gCfg.handoverTokens,
+        handoverWaitMinutes: gCfg.handoverWaitMinutes,
+        keepWarmMax: gCfg.keepWarmMax,
+        ...(sessionModel ? { sessionModel } : {}),
+        ...(gCfg.sizeHandover ? { retireTokens: cfg.retireContextTokens } : {}),
+      }
       const plans = planActions(seen, store, agentRules(), auto, now)
       const safely = (plan: Plan) => runPlan($, plan, now).catch(err => failedOnce($, plan.id, plain() ? `${plan.kind} of ${plan.id} failed` : `${plan.kind} of ${plan.label} (${plan.id}) failed: ${err}`))
       await Promise.all(plans.filter(x => x.kind === 'warm' || x.kind === 'handover').map(safely))

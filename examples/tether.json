@@ -64,6 +64,7 @@
     "auto": true,
     "leadMinutes": 20,
     "handoverTokens": 250000,
+    "sizeHandover": true,
     "handoverWaitMinutes": 10,
     "keepWarmMax": 12,
     "keepWarmText": "Tether cache guard: keep waiting, no action needed. Reply with one word, then wait as before.",

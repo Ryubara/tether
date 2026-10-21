@@ -8,6 +8,11 @@ export type CacheGuardConfig = {
   leadMinutes: number
   /** A stopped agent with live background work and at least this context is handed over, not kept warm. */
   handoverTokens: number
+  /**
+   * A stopped agent with live background work whose context has passed `fleet.retireContextTokens` is asked to hand
+   * over at once, at the first tick after it stops, not only near its cache's expiry. Off: size counts only then.
+   */
+  sizeHandover: boolean
   /** Minutes the agent gets to finish its handover; later the coordinator is alerted (the agent is never stopped silently). */
   handoverWaitMinutes: number
   /** Keep-warm messages to one agent before the coordinator is asked to decide. */
@@ -28,6 +33,7 @@ export const CACHE_GUARD_DEFAULTS: CacheGuardConfig = {
   auto: true,
   leadMinutes: 20,
   handoverTokens: 250_000,
+  sizeHandover: true,
   handoverWaitMinutes: 10,
   keepWarmMax: 12,
   keepWarmText: 'Tether cache guard: keep waiting, no action needed. Reply with one word, then wait as before.',
@@ -49,6 +55,7 @@ export function mergeCacheGuard(raw: unknown): CacheGuardConfig {
   const r = raw as Record<string, unknown>
   if (typeof r.auto === 'boolean') out.auto = r.auto
   if (typeof r.registerTools === 'boolean') out.registerTools = r.registerTools
+  if (typeof r.sizeHandover === 'boolean') out.sizeHandover = r.sizeHandover
   out.leadMinutes = num(r.leadMinutes, out.leadMinutes)
   out.handoverTokens = num(r.handoverTokens, out.handoverTokens)
   out.handoverWaitMinutes = num(r.handoverWaitMinutes, out.handoverWaitMinutes)

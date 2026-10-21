@@ -135,6 +135,35 @@ test('noteAppendedRow reads one appended row by its structure and contentText jo
   expect(contentText(undefined)).toBe('')
 })
 
+test('a command moved to the background by its timeout or by the user is a live task, in the transcript and in an appended row', async () => {
+  const moved = (id: string) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: `Command did not complete within its 120s timeout and was moved to the background (ID: ${id}). Output is being written to: x` }] } })
+  const manual = (id: string) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: `Command was manually backgrounded by user with ID: ${id}. Output is being written to: x` }] } })
+  expect(liveTasks([moved('m1'), manual('m2')].join('\n'))).toEqual(['m1', 'm2'])
+  const live = new Set<string>()
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: 'Command did not complete within its 600s timeout and was moved to the background (ID: m3). Output is being written to: y' }] } }, live)
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: 'Command was manually backgrounded by user with ID: m4. Output is being written to: y' }] } }, live)
+  expect([...live]).toEqual(['m3', 'm4'])
+  // Quoted mid-text it starts nothing
+  expect(liveTasks(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'log: Command was manually backgrounded by user with ID: f1.' }] } }))).toEqual([])
+})
+
+test('a task the agent stopped itself with TaskStop ends, in the transcript and in an appended row', async () => {
+  // Measured on 2.1.296: the agent's own TaskStop is answered by a user row, and no task-notification follows
+  const stop = (id: string) => {
+    const r = { message: `Successfully stopped task: ${id} (build)`, task_id: id, task_type: 'local_bash', command: 'build' }
+    return JSON.stringify({ type: 'user', toolUseResult: r, message: { role: 'user', content: [{ type: 'tool_result', content: JSON.stringify(r) }] } })
+  }
+  expect(liveTasks([start('b1'), start('b2'), stop('b1')].join('\n'))).toEqual(['b2'])
+  const live = new Set(['b1', 'b2'])
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: JSON.stringify({ message: 'Successfully stopped task: b2 (x)', task_id: 'b2' }) }] } }, live)
+  expect([...live]).toEqual(['b1'])
+  // A result that names another task than its message, or text that merely quotes the answer, ends nothing
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: JSON.stringify({ message: 'Successfully stopped task: b9 (x)', task_id: 'b1' }) }] } }, live)
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: 'cat log: {"message":"Successfully stopped task: b1","task_id":"b1"}' }] } }, live)
+  noteAppendedRow({ message: { type: 'assistant', content: [{ type: 'tool_result', content: JSON.stringify({ message: 'Successfully stopped task: b1 (x)', task_id: 'b1' }) }] } }, live)
+  expect([...live]).toEqual(['b1'])
+})
+
 test('the model of the last request and the model an Agent call pinned are read from the transcript and the meta file', async () => {
   const entry = (at: string, model: string) => JSON.stringify({ type: 'assistant', timestamp: at, message: { model, usage: { input_tokens: 2 } } })
   expect(lastRequest([entry('2026-10-13T08:00:00.000Z', 'claude-sonnet-5-5'), entry('2026-10-13T09:00:00.000Z', 'claude-opus-5-5')].join('\n'))?.model).toBe('claude-opus-5-5')

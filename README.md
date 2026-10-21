@@ -114,6 +114,18 @@ run inside Claude Code (version 2.1.287 or later). See the
     or a background Agent that Tether cannot identify). Each kind of alert is told once per cycle; a new silence of
     the agent is told again. The messages go out first and together, and every send and every `TaskStop` has a 30 s
     timeout, so one blocked permission dialog cannot stall the pings due for other agents.
+  - **Hand over past the max context.** A busy agent that stops between build waits every few minutes never sits
+    idle long enough for the rule above, so it would only grow. With `cacheGuard.sizeHandover` on (the default), a
+    stopped agent with background work whose context has passed `fleet.retireContextTokens` (the one subagent max
+    context, default 300k, that the pane's `retire` flag and the agents poller also use) is sent the same handover
+    request at the first tick after it stops, whatever its idle time, and then goes through the same steps (its
+    leftover tasks stopped once it has stopped, retired once quiet, an alert when late). A kept-warm record does not
+    hold it back; a retired or done one does, and an expired cache is never messaged. An agent past the line that
+    stopped with no background work has ended its turn and reported, so it is left to the model, as before.
+  - **Tasks the agent ends itself.** A background task ends at its `<task-notification>`, or when the agent stops it
+    with its own `TaskStop` (the answer "Successfully stopped task: <id>" is the only trace; no notification
+    follows). A command moved to the background by its timeout, or by the user, starts a task like
+    `run_in_background` does.
   - **The guard trusts `fleet.cacheTtlMinutes`** (default 60, the one-hour cache the sessions use). It acts at that
     value less the lead. If the real cache lifetime is shorter (the 5-minute default cache, when the one-hour cache
     is not enabled for subagents), the cache dies long before the guard acts and nothing it does helps: set
@@ -143,8 +155,9 @@ run inside Claude Code (version 2.1.287 or later). See the
   or waiting subagent (a finished one is resumed from its transcript) and `$.tool.call({ tool: 'TaskStop', task_id })`
   stops a task, through the permission check, so a project that has not allowed TaskStop may see a prompt. There is no
   call that lists an agent's background tasks. `$.agent.list()` says `waiting` for an agent held on background work;
-  the task ids come from the rows appended to its conversation (`session.append`: "running in background with ID"
-  and the `<task-notification>` that ends a task) and, for a transcript under 4 MB (the most `$.fs.read` returns),
+  the task ids come from the rows appended to its conversation (`session.append`: "running in background with ID",
+  "moved to the background (ID: ...)" or "manually backgrounded by user with ID", and the `<task-notification>` or
+  the agent's own `TaskStop` answer that ends a task) and, for a transcript under 4 MB (the most `$.fs.read` returns),
   from its transcript file; tasks seen in a small transcript are kept as the baseline when it later grows past
   4 MB. Only the harness's own structure counts (a user row's `toolUseResult.backgroundTaskId` or tool result that
   starts with the answer, and a notification block with a final status in a `queued_command` attachment or a
@@ -234,6 +247,7 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `cacheGuardRegisterTools` | `true` | Register pr_owner and agent_decision, the tools the model records owners and decisions with (Claude Code serves them from a loopback port in the session). Off: no tool, and the end of a turn is never blocked for a record only they could make. |
 | `cacheGuardLeadMinutes` | `20` | Act this many minutes before the cache expires (at most half the cache lifetime). |
 | `cacheGuardHandoverTokens` | `250000` | A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm, if it runs on the session model (else it is handed over too). |
+| `cacheGuardSizeHandover` | `true` | A stopped agent with live background work whose context has passed the subagent max context (fleetRetireContextTokens) is asked to hand over at its next stop, not only near its cache expiry. Off: size counts only then. |
 | `cacheGuardHandoverWaitMinutes` | `10` | Minutes an agent gets to finish its handover (at most half the lead); later the coordinator is alerted. The agent is never stopped silently. |
 | `cacheGuardKeepWarmMax` | `12` | Keep-warm messages to one agent in a row (real work between two starts a new run) before the coordinator is asked to decide. |
 | `cacheGuardKeepWarmText` | `Tether cache guard: keep waiting, no action needed. Reply with one word, then wait as before.` | The message that keeps a waiting agent warm. |

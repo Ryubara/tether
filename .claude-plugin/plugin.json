@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.29",
+  "version": "1.0.0-alpha.30",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -310,6 +310,12 @@
       "title": "Hand over at (tokens)",
       "description": "A stopped agent with live background work and at least this context is asked to hand over and is then stopped; a smaller one is kept warm, if it runs on the session model (else it is handed over too).",
       "default": 250000
+    },
+    "cacheGuardSizeHandover": {
+      "type": "boolean",
+      "title": "Hand over past the max context",
+      "description": "A stopped agent with live background work whose context has passed the subagent max context (fleetRetireContextTokens) is asked to hand over at its next stop, not only near its cache expiry. Off: size counts only then.",
+      "default": true
     },
     "cacheGuardHandoverWaitMinutes": {
       "type": "number",

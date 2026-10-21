@@ -69,8 +69,14 @@ export function metaModel(text: string): string | undefined {
 /** How a background task ends in the notification Claude Code queues for its owner. */
 const ENDED_STATUSES = new Set(['completed', 'failed', 'killed'])
 
-/** What a background Bash call is answered with; a tool result block starts with it, the id follows. */
-const STARTED = /^Command running in background with ID: ([A-Za-z0-9_-]+)/
+/**
+ * What a Bash call that went to the background is answered with; a tool result block starts with it. Three forms,
+ * measured on 2.1.296: started with `run_in_background`, moved there by its timeout, and backgrounded by the user.
+ */
+const STARTED = /^Command (?:running in background with ID: |was manually backgrounded by user with ID: |did not complete within its \d+s timeout and was moved to the background \(ID: )([A-Za-z0-9_-]+)/
+
+/** What the agent's own TaskStop is answered with (JSON in the tool result); no task-notification follows it. */
+const STOPPED_PREFIX = 'Successfully stopped task: '
 
 /** A task id as the harness spells it (letters, digits, dash, underscore). */
 const TASK_ID = /^[A-Za-z0-9_-]+$/
@@ -102,6 +108,31 @@ function startedIn(content: unknown): string[] {
   return out
 }
 
+/** The id a TaskStop answer stopped, when `r` is one: its message names the same id as its `task_id`. */
+function stoppedBy(r: unknown): string | undefined {
+  const x = r as { message?: unknown; task_id?: unknown } | null
+  if (!x || typeof x !== 'object' || typeof x.message !== 'string' || typeof x.task_id !== 'string' || !TASK_ID.test(x.task_id)) return undefined
+  return x.message.startsWith(STOPPED_PREFIX + x.task_id) ? x.task_id : undefined
+}
+
+/** The ids the tool_result blocks of a user row's content say TaskStop stopped (a block is the answer's JSON, nothing else). */
+function stoppedIn(content: unknown): string[] {
+  if (!Array.isArray(content)) return []
+  const out: string[] = []
+  for (const b of content as Array<Record<string, unknown>>) {
+    if (b?.type !== 'tool_result') continue
+    const text = contentText(b.content).trim()
+    if (!text.startsWith('{')) continue
+    try {
+      const id = stoppedBy(JSON.parse(text))
+      if (id) out.push(id)
+    } catch {
+      // Not the answer's JSON
+    }
+  }
+  return out
+}
+
 /** Ends the tasks whose notification block in `text` carries a final status (completed, failed, killed). */
 function endedIn(text: string, live: Set<string>): void {
   for (const block of text.matchAll(NOTIFICATION)) {
@@ -114,10 +145,12 @@ function endedIn(text: string, live: Set<string>): void {
 /**
  * Applies one transcript entry to `live`, the set of background task ids a subagent has running. Only the
  * harness's own structure counts, never free text an agent printed or read: a background Bash is answered by a user
- * entry whose `toolUseResult.backgroundTaskId` names the task (or whose tool_result block starts with the answer
- * "Command running in background with ID: <id>"), and its end is a `<task-notification>` block with a final
- * `<status>` in a user entry whose origin is `task-notification` or in a `queued_command` attachment. Measured on
- * Claude Code 2.1.296. A task of another kind (a monitor, a background agent) is not recognised.
+ * entry whose `toolUseResult.backgroundTaskId` names the task (or whose tool_result block starts with one of the
+ * answers in STARTED: run in the background, moved there by its timeout, or backgrounded by the user), and its end is a `<task-notification>` block with a final
+ * `<status>` in a user entry whose origin is `task-notification` or in a `queued_command` attachment, or the answer
+ * to the agent's own TaskStop of it (`toolUseResult` `{ message: "Successfully stopped task: <id> ...", task_id }`,
+ * which no notification follows). Measured on Claude Code 2.1.296. A task of another kind (a monitor, a background
+ * agent) is not recognised.
  */
 export function noteTaskEntry(entry: unknown, live: Set<string>): void {
   const e = entry as { type?: unknown; toolUseResult?: { backgroundTaskId?: unknown }; message?: { content?: unknown }; origin?: { kind?: unknown }; attachment?: { type?: unknown; prompt?: unknown } } | null
@@ -126,6 +159,10 @@ export function noteTaskEntry(entry: unknown, live: Set<string>): void {
     const id = e.toolUseResult?.backgroundTaskId
     if (typeof id === 'string' && TASK_ID.test(id)) live.add(id)
     else for (const s of startedIn(e.message?.content)) live.add(s)
+    // The agent's own TaskStop: the answer is the only trace, no notification follows
+    const stopped = stoppedBy(e.toolUseResult)
+    if (stopped) live.delete(stopped)
+    else for (const s of stoppedIn(e.message?.content)) live.delete(s)
     if (e.origin?.kind === 'task-notification') endedIn(contentText(e.message?.content), live)
   } else if (e.type === 'attachment' && e.attachment?.type === 'queued_command' && typeof e.attachment.prompt === 'string') {
     endedIn(e.attachment.prompt, live)
@@ -140,7 +177,10 @@ export function noteTaskEntry(entry: unknown, live: Set<string>): void {
 export function noteAppendedRow(row: { message?: { type?: unknown; name?: unknown; content?: unknown }; origin?: { kind?: unknown } }, live: Set<string>): void {
   const m = row.message
   if (!m || typeof m !== 'object') return
-  if (m.type === 'user') for (const s of startedIn(m.content)) live.add(s)
+  if (m.type === 'user') {
+    for (const s of startedIn(m.content)) live.add(s)
+    for (const s of stoppedIn(m.content)) live.delete(s)
+  }
   if ((m.type === 'attachment' && m.name === 'queued_command') || row.origin?.kind === 'task-notification') endedIn(contentText(m.content), live)
 }
 
@@ -149,7 +189,7 @@ export function liveTasks(text: string): string[] {
   const live = new Set<string>()
   for (const line of text.split('\n')) {
     // Cheap filter first: most lines name no task
-    if (!line.includes('background') && !line.includes('task-notification')) continue
+    if (!line.includes('background') && !line.includes('task-notification') && !line.includes(STOPPED_PREFIX)) continue
     try {
       noteTaskEntry(JSON.parse(line), live)
     } catch {
