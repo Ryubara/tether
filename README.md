@@ -112,19 +112,24 @@ run inside Claude Code (version 2.1.287 or later). See the
     half the lead, so the alert comes before the cache expires), for tasks that `TaskStop` would not stop or did
     not answer within 30 s, and for an agent that is still `waiting` after its known tasks were stopped (a Monitor
     or a background Agent that Tether cannot identify). Each kind of alert is told once per cycle; a new silence of
-    the agent is told again. The messages go out first and together, and every send and every `TaskStop` has a 30 s
+    the agent is told again. A keep-warm or handover message that fails is said once and tried again 5 minutes
+    later, not at every tick. The messages go out first and together, and every send and every `TaskStop` has a 30 s
     timeout, so one blocked permission dialog cannot stall the pings due for other agents.
   - **Hand over past the max context.** A busy agent that stops between build waits every few minutes never sits
     idle long enough for the rule above, so it would only grow. With `cacheGuard.sizeHandover` on (the default), a
     stopped agent with background work whose context has passed `fleet.retireContextTokens` (the one subagent max
     context, default 300k, that the pane's `retire` flag and the agents poller also use) is sent the same handover
     request at the first tick after it stops, whatever its idle time, and then goes through the same steps (its
-    leftover tasks stopped once it has stopped, retired once quiet, an alert when late). A kept-warm record does not
-    hold it back; a retired or done one does, and an expired cache is never messaged. An agent past the line that
+    leftover tasks stopped once it has stopped, retired once quiet, an alert when late). Tether's own keep-warm pings
+    do not hold it back; a retired or done record does, and an expired cache is never messaged. If the coordinator
+    records the agent `kept-warm` after the request (or once it is past the line), that is its call: Tether does not
+    ask again at later stops, though the usual near-expiry rule still applies. An agent on another model is asked
+    too, and the toast says the message writes one new cache on the session's model. An agent past the line that
     stopped with no background work has ended its turn and reported, so it is left to the model, as before.
   - **Tasks the agent ends itself.** A background task ends at its `<task-notification>`, or when the agent stops it
     with its own `TaskStop` (the answer "Successfully stopped task: <id>" is the only trace; no notification
-    follows). A command moved to the background by its timeout, or by the user, starts a task like
+    follows). Only TaskStop's own result counts, read from its structured record or, in an appended row, from a row
+    whose origin is the TaskStop tool, and its id must match whole: the same JSON printed by Bash ends nothing. A command moved to the background by its timeout, or by the user, starts a task like
     `run_in_background` does.
   - **The guard trusts `fleet.cacheTtlMinutes`** (default 60, the one-hour cache the sessions use). It acts at that
     value less the lead. If the real cache lifetime is shorter (the 5-minute default cache, when the one-hour cache

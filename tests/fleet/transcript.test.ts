@@ -154,14 +154,24 @@ test('a task the agent stopped itself with TaskStop ends, in the transcript and 
     return JSON.stringify({ type: 'user', toolUseResult: r, message: { role: 'user', content: [{ type: 'tool_result', content: JSON.stringify(r) }] } })
   }
   expect(liveTasks([start('b1'), start('b2'), stop('b1')].join('\n'))).toEqual(['b2'])
-  const live = new Set(['b1', 'b2'])
-  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: JSON.stringify({ message: 'Successfully stopped task: b2 (x)', task_id: 'b2' }) }] } }, live)
-  expect([...live]).toEqual(['b1'])
-  // A result that names another task than its message, or text that merely quotes the answer, ends nothing
-  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: JSON.stringify({ message: 'Successfully stopped task: b9 (x)', task_id: 'b1' }) }] } }, live)
-  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: 'cat log: {"message":"Successfully stopped task: b1","task_id":"b1"}' }] } }, live)
-  noteAppendedRow({ message: { type: 'assistant', content: [{ type: 'tool_result', content: JSON.stringify({ message: 'Successfully stopped task: b1 (x)', task_id: 'b1' }) }] } }, live)
-  expect([...live]).toEqual(['b1'])
+  // The id is matched whole: stopping b1 does not end b10
+  expect(liveTasks([start('b1'), start('b10'), stop('b1')].join('\n'))).toEqual(['b10'])
+  // Bash that printed the same JSON (its record is stdout, not TaskStop's) ends nothing
+  const printed = JSON.stringify({ message: 'Successfully stopped task: b2 (x)', task_id: 'b2', task_type: 'local_bash' })
+  const bash = JSON.stringify({ type: 'user', toolUseResult: { stdout: printed, stderr: '' }, message: { role: 'user', content: [{ type: 'tool_result', content: printed }] } })
+  expect(liveTasks([start('b2'), bash].join('\n'))).toEqual(['b2'])
+  // In an appended row only TaskStop's own result counts (its origin names the tool)
+  const answer = (id: string, named = id) => [{ type: 'tool_result', content: JSON.stringify({ message: `Successfully stopped task: ${named} (x)`, task_id: id, task_type: 'local_bash' }) }]
+  const live = new Set(['b1', 'b2', 'b10'])
+  noteAppendedRow({ message: { type: 'user', content: answer('b2') }, origin: { kind: 'tool', tool: 'TaskStop' } }, live)
+  expect([...live]).toEqual(['b1', 'b10'])
+  // The same JSON as Bash output, or with no origin, or naming another task than its message, or as b1 against b10: nothing ends
+  noteAppendedRow({ message: { type: 'user', content: answer('b1') }, origin: { kind: 'tool', tool: 'Bash' } }, live)
+  noteAppendedRow({ message: { type: 'user', content: answer('b1') } }, live)
+  noteAppendedRow({ message: { type: 'user', content: answer('b1', 'b9') }, origin: { kind: 'tool', tool: 'TaskStop' } }, live)
+  noteAppendedRow({ message: { type: 'user', content: answer('b10', 'b1') }, origin: { kind: 'tool', tool: 'TaskStop' } }, live)
+  noteAppendedRow({ message: { type: 'user', content: [{ type: 'tool_result', content: 'cat log: {"message":"Successfully stopped task: b1","task_id":"b1"}' }] }, origin: { kind: 'tool', tool: 'TaskStop' } }, live)
+  expect([...live]).toEqual(['b1', 'b10'])
 })
 
 test('the model of the last request and the model an Agent call pinned are read from the transcript and the meta file', async () => {

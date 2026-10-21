@@ -365,8 +365,21 @@ test('an agent past the retire size is asked to hand over at its next stop, long
   // A kept-warm record does not hold it back; a retired or done one does
   expect(run([waiting('big', 1, 466_000)], recordDecision(EMPTY_STORE, 'big', 'kept-warm', '', 't', NOW - 2 * MIN))).toEqual(['handover:big:retire'])
   expect(run([waiting('big', 1, 466_000)], recordDecision(EMPTY_STORE, 'big', 'retired', '', 't', NOW - 2 * MIN))).toEqual([])
-  // Asked already: not asked again while the handover runs
-  expect(run([waiting('big', 1, 466_000)], recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 30_000 }))).toEqual([])
+  // Asked already and since stopped, with a kept-warm newer than the ask (an older store): the handover block skips it
+  // (covered), and the retire rule must not ask it a second time
+  const askedThenKept = recordDecision(recordAction(EMPTY_STORE, 'big', { handoverAt: NOW - 3 * MIN }), 'big', 'kept-warm', '', 't', NOW - 2 * MIN)
+  expect(run([waiting('big', 0.5, 466_000, { finishedAt: NOW - 20_000, lastStepAt: NOW - 30_000 })], askedThenKept)).toEqual([])
+  // The coordinator kept it past the line (retireKept): its call, never asked again
+  expect(run([waiting('big', 1, 466_000)], recordAction(EMPTY_STORE, 'big', { retireKept: NOW - 10 * MIN }))).toEqual([])
+  // A message that failed a moment ago waits SEND_BACKOFF_MS before the next try; a warm ping too
+  const failed = recordAction(EMPTY_STORE, 'big', { sendFailedAt: NOW - 2 * MIN })
+  expect(run([waiting('big', 1, 466_000)], failed)).toEqual([])
+  expect(planActions([waiting('big', 1, 466_000)], failed, RULES_30, auto, NOW + 3 * MIN + 1).map(p => p.kind)).toEqual(['handover'])
+  expect(planActions([waiting('small', 41, 100_000)], recordAction(EMPTY_STORE, 'small', { sendFailedAt: NOW - MIN }), RULES_30, auto, NOW)).toEqual([])
+  // An agent on another model is still asked, flagged so the message says it writes one new cache
+  expect(planActions([waiting('big', 1, 466_000, { model: 'claude-sonnet-5-5' })], EMPTY_STORE, RULES_30, auto, NOW)).toMatchObject([{ kind: 'handover', why: 'retire', otherModel: true }])
+  expect(planActions([waiting('big', 1, 466_000)], EMPTY_STORE, RULES_30, auto, NOW)[0]).not.toHaveProperty('otherModel')
+  expect(readStore(JSON.parse(JSON.stringify(recordAction(failed, 'big', { retireKept: NOW })))).actions['big']).toMatchObject({ sendFailedAt: NOW - 2 * MIN, retireKept: NOW })
   // An expired cache is never messaged (the message would be the re-write): the old alert
   expect(run([waiting('big', 65, 466_000)])).toEqual(['alert:big'])
 })

@@ -6,9 +6,12 @@
   background work whose context has passed `fleet.retireContextTokens` is asked to hand over at the first tick after
   it stops, not only near its cache's expiry, then goes through the usual steps (leftover tasks stopped, retired once
   quiet, an alert when late). A busy agent that stops between build waits every few minutes was never idle long
-  enough for the old rule, so it grew on (466k measured) with no request.
+  enough for the old rule, so it grew on (466k measured) with no request. Recording the agent kept-warm after the
+  request (or past the line) with `agent_decision` keeps it: Tether does not ask again at later stops.
+- Changed: a keep-warm or handover message that fails is tried again after 5 minutes, not at every tick.
 - Fixed: a task the agent stopped itself with `TaskStop` stayed live for good, because no task-notification follows
-  that stop; the answer ("Successfully stopped task: <id>") now ends it. Such a ghost task kept an agent counted as
+  that stop; the answer ("Successfully stopped task: <id>") now ends it. Only TaskStop's own result counts (its
+  record, or an appended row whose origin is the tool), and the id is matched whole. Such a ghost task kept an agent counted as
   having background work and made `agent_decision` refuse to record it retired or done.
 - Fixed: a command moved to the background by its timeout ("did not complete within its Ns timeout and was moved to
   the background") or by the user was not seen as a task in an appended row, the only source once an agent's

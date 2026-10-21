@@ -40,6 +40,13 @@ export type AgentAction = {
   stopFailedAt?: number
   /** When each kind of problem was told to the coordinator; see `alerted` in agents.ts. */
   alerts: Partial<Record<AlertKind, number>>
+  /**
+   * When the coordinator recorded the agent kept-warm after a handover request or past the retire line: its call,
+   * so the size handover does not ask it again. Kept across cycles.
+   */
+  retireKept?: number
+  /** When the last keep-warm or handover message to it failed; the next one waits SEND_BACKOFF_MS. */
+  sendFailedAt?: number
 }
 
 /** A rerun of a PR's failed checks that the project's health command reported making; it owns those checks until `until`. */
@@ -106,6 +113,8 @@ export function readStore(raw: unknown): GuardStore {
       ...(time(a.tasksStoppedAt) !== undefined ? { tasksStoppedAt: time(a.tasksStoppedAt) } : {}),
       ...(time(a.stoppedCount) !== undefined ? { stoppedCount: time(a.stoppedCount) } : {}),
       ...(time(a.stopFailedAt) !== undefined ? { stopFailedAt: time(a.stopFailedAt) } : {}),
+      ...(time(a.retireKept) !== undefined ? { retireKept: time(a.retireKept) } : {}),
+      ...(time(a.sendFailedAt) !== undefined ? { sendFailedAt: time(a.sendFailedAt) } : {}),
     }
   }
   return out

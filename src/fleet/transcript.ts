@@ -77,6 +77,8 @@ const STARTED = /^Command (?:running in background with ID: |was manually backgr
 
 /** What the agent's own TaskStop is answered with (JSON in the tool result); no task-notification follows it. */
 const STOPPED_PREFIX = 'Successfully stopped task: '
+/** The id in that answer's message, captured whole (b1 must not match b10). */
+const STOPPED = /^Successfully stopped task: (\S+)/
 
 /** A task id as the harness spells it (letters, digits, dash, underscore). */
 const TASK_ID = /^[A-Za-z0-9_-]+$/
@@ -108,14 +110,20 @@ function startedIn(content: unknown): string[] {
   return out
 }
 
-/** The id a TaskStop answer stopped, when `r` is one: its message names the same id as its `task_id`. */
+/**
+ * The id a TaskStop answer stopped, when `r` is one: TaskStop's whole record (`message`, `task_id`, `task_type`),
+ * whose message names exactly its `task_id`. A Bash call's record (stdout, stderr) never has that shape.
+ */
 function stoppedBy(r: unknown): string | undefined {
-  const x = r as { message?: unknown; task_id?: unknown } | null
-  if (!x || typeof x !== 'object' || typeof x.message !== 'string' || typeof x.task_id !== 'string' || !TASK_ID.test(x.task_id)) return undefined
-  return x.message.startsWith(STOPPED_PREFIX + x.task_id) ? x.task_id : undefined
+  const x = r as { message?: unknown; task_id?: unknown; task_type?: unknown } | null
+  if (!x || typeof x !== 'object' || typeof x.message !== 'string' || typeof x.task_id !== 'string' || typeof x.task_type !== 'string' || !TASK_ID.test(x.task_id)) return undefined
+  return STOPPED.exec(x.message)?.[1] === x.task_id ? x.task_id : undefined
 }
 
-/** The ids the tool_result blocks of a user row's content say TaskStop stopped (a block is the answer's JSON, nothing else). */
+/**
+ * The ids the tool_result blocks of a row's content say TaskStop stopped (a block is the answer's JSON, nothing
+ * else). Only for a row known to be TaskStop's result (an appended row whose origin names the tool).
+ */
 function stoppedIn(content: unknown): string[] {
   if (!Array.isArray(content)) return []
   const out: string[] = []
@@ -160,9 +168,9 @@ export function noteTaskEntry(entry: unknown, live: Set<string>): void {
     if (typeof id === 'string' && TASK_ID.test(id)) live.add(id)
     else for (const s of startedIn(e.message?.content)) live.add(s)
     // The agent's own TaskStop: the answer is the only trace, no notification follows
+    // Read from the structured record alone: a tool result's text could be any tool's output (a cat of a JSON file)
     const stopped = stoppedBy(e.toolUseResult)
     if (stopped) live.delete(stopped)
-    else for (const s of stoppedIn(e.message?.content)) live.delete(s)
     if (e.origin?.kind === 'task-notification') endedIn(contentText(e.message?.content), live)
   } else if (e.type === 'attachment' && e.attachment?.type === 'queued_command' && typeof e.attachment.prompt === 'string') {
     endedIn(e.attachment.prompt, live)
@@ -174,12 +182,13 @@ export function noteTaskEntry(entry: unknown, live: Set<string>): void {
  * same structure as a transcript entry: a user row's tool_result block that starts with the background-start
  * answer, and a `queued_command` attachment or a task-notification-origin row holding a notification block.
  */
-export function noteAppendedRow(row: { message?: { type?: unknown; name?: unknown; content?: unknown }; origin?: { kind?: unknown } }, live: Set<string>): void {
+export function noteAppendedRow(row: { message?: { type?: unknown; name?: unknown; content?: unknown }; origin?: { kind?: unknown; tool?: unknown } }, live: Set<string>): void {
   const m = row.message
   if (!m || typeof m !== 'object') return
   if (m.type === 'user') {
     for (const s of startedIn(m.content)) live.add(s)
-    for (const s of stoppedIn(m.content)) live.delete(s)
+    // Only TaskStop's own result ends a task: the same JSON printed by Bash or read from a file does not
+    if (row.origin?.kind === 'tool' && row.origin.tool === 'TaskStop') for (const s of stoppedIn(m.content)) live.delete(s)
   }
   if ((m.type === 'attachment' && m.name === 'queued_command') || row.origin?.kind === 'task-notification') endedIn(contentText(m.content), live)
 }

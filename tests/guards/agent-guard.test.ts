@@ -540,3 +540,53 @@ test('with cacheGuard.sizeHandover off a big agent waits for the act-after time 
   expect(w.sent.length).toBe(1)
   expect(w.toasts.some(t => t.includes('retire line'))).toBe(false)
 })
+
+test('a big agent the coordinator records kept-warm after the size handover request is not asked again at its next stop', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 466_000 })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+  // The coordinator decides to keep it: its call
+  expect((await decide($, 'kept-warm')).deny).toBeUndefined()
+  // The agent goes on working and stops again on its build
+  await step($)
+  await $.turn.complete({ turnId: 't', answer: 'waiting on the build', agentId: 'a1' } as any)
+  await clock.advance(5 * MIN)
+  expect(w.sent.length).toBe(1)
+  expect(w.stopped).toEqual([])
+})
+
+test('a handover after an older kept-warm record is collected once the agent stops', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 466_000 })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  // An earlier kept-warm, recorded before the agent passed the line (Tether had not asked it anything yet)
+  w.context = 200_000
+  await step($)
+  expect((await decide($, 'kept-warm')).deny).toBeUndefined()
+  w.context = 466_000
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+  await step($)
+  await $.turn.complete({ turnId: 't', answer: 'handed over', agentId: 'a1' } as any)
+  w.agents[0]!.status = 'completed'
+  await clock.advance(1 * MIN)
+  expect(w.stopped).toEqual(['bt1'])
+})
+
+test('a failed message is not resent every tick: the next try waits a few minutes', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 466_000, delivery: { isDelivered: false, reason: 'gone' } })
+  const clock = await start($, on, CFG, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  await clock.advance(3 * MIN)
+  expect(w.sent.length).toBe(1)
+  await clock.advance(3 * MIN)
+  expect(w.sent.length).toBe(2)
+  expect(w.logs.filter(l => l.includes('handover request to worker (a1) failed')).length).toBe(1)
+})
