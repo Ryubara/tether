@@ -1,6 +1,6 @@
 {
   "name": "tether",
-  "version": "1.0.0-alpha.30",
+  "version": "1.0.0-alpha.31",
   "description": "Holds a project together across Claude Code sessions: an agents pane, watchers that wake the model only for news, and guards against expensive mistakes",
   "author": {
     "name": "Ryubara",
@@ -238,6 +238,24 @@
       "title": "Open the Tether pane at start (watch)",
       "description": "Open the Tether pane, without taking focus, when a session starts or is cleared, while watch is on. Either option opens it once.",
       "default": false
+    },
+    "watchIdleWakeMinutes": {
+      "type": "number",
+      "title": "Idle wake (minutes)",
+      "description": "Wake the model after this many idle minutes with no subagent at work, though no poller found anything. 0: never.",
+      "default": 0
+    },
+    "watchIdleWakeText": {
+      "type": "string",
+      "title": "Idle wake message",
+      "description": "The prompt of the idle wake; {minutes} stands for the idle minutes.",
+      "default": "Nothing new: woken after {minutes} idle minutes with no subagent at work. Take up the next piece of work, or say why there is none."
+    },
+    "watchResendAfterMinutes": {
+      "type": "number",
+      "title": "Resend a lost wake (minutes)",
+      "description": "A wake that started no turn while the session sat idle this long is sent again; a refused wake is tried again after this long or after the next turn starts.",
+      "default": 2
     },
     "watchPaneRows": {
       "type": "number",

@@ -32,6 +32,15 @@ run inside Claude Code (version 2.1.287 or later). See the
   new findings, never during a turn or while you type. `/tether-watch` reports (it never stops polling) and opens
   the Tether pane, whose boxes show each poller's countdown and findings; `/tether-watch run`, `forget` and
   `reload` poll now, tell findings again and re-read the config.
+  A wake counts as sent only once a turn starts for it: one the engine refuses (a hook drops it, or a Stop stands
+  after you interrupt a turn) is told once in a toast and the status line (`wake refused`) and tried again after
+  `watch.resendAfterMinutes` (default 2) or as soon as your next turn starts; one it takes that starts no turn
+  while the session sits idle that long is sent again. Until then no second wake stacks behind it; what is found
+  meanwhile joins the next one. A finding still reported after it was told is not told again, unless its poller sets
+  `remindMinutes` (default 0, off): then it is told again that long after, marked `(still reported)`, then after
+  twice as long each time, at most every `remindMaxMinutes` (default 240). `watch.idleWakeMinutes` (default 0, off)
+  also wakes the model after that many idle minutes with nothing found, nobody typing and no subagent pending,
+  running or waiting, with `watch.idleWakeText` as the prompt (`{minutes}` stands for the minutes).
 - **Commands.** `/tether-fleet` (the pane; `text` prints the table), `/tether-watch` (report and pane; `run`, `forget`, `reload`, `pane`),
   `/tether-guards` (text) and `/tether-checkpoint` (a checkpoint now). Pane commands say `(PANE)` in the command list. The names are prefixed with `tether-`
   because the plugin API takes only letters, digits, `_` and `-` in a command name (no `:`).
@@ -75,6 +84,11 @@ run inside Claude Code (version 2.1.287 or later). See the
   line's `detail` says why.
   The model records an owner (`assign`, a few hours) or a known wait (`waive`, optionally for one cause) with the
   `mcp__tether__pr_owner` tool; an expired owner raises the problem again.
+- **Issues.** An `issues` poller tells each open issue on GitHub that carries one of its `labels` (read with `gh
+  issue list` in the poller's `cwd`, at most `limit`, default 100, per label; every `everySeconds`, default 120). An
+  issue is told once by its number and the label, never its title or body, and again when it changes (its
+  `updatedAt`) or comes back after losing the label. For example, to be woken for issues waiting for triage:
+  `{ "id": "triage", "kind": "issues", "title": "Issues to triage", "labels": ["needs-triage"] }`.
 - **Agent guard.** A stopped subagent holding a big context (`fleet.bigContextTokens`, default 60k) loses its prompt
   cache `fleet.cacheTtlMinutes` (default 60) after its last request, and one with live background work (a
   `run_in_background` poller, a build wait) wakes itself when that work reports, re-writing the whole context
@@ -240,6 +254,9 @@ structured stays in the file only: `watch.pollers`, `fleet.annotate`, `fleet.col
 | `watchStoreName` | `default` | Names this project seen-set in the store, so two projects keep their own. |
 | `watchStateFile` | (empty) | A file watch writes the boxes data to, for fleet to draw. Empty: none. |
 | `watchOpenOnStart` | `false` | Open the Tether pane, without taking focus, when a session starts or is cleared, while watch is on. Either option opens it once. |
+| `watchIdleWakeMinutes` | `0` | Wake the model after this many idle minutes with no subagent at work, though no poller found anything. 0: never. |
+| `watchIdleWakeText` | `Nothing new: woken after {minutes} idle minutes with no subagent at work. Take up the next piece of work, or say why there is none.` | The prompt of the idle wake; {minutes} stands for the idle minutes. |
+| `watchResendAfterMinutes` | `2` | A wake that started no turn while the session sat idle this long is sent again; a refused wake is tried again after this long or after the next turn starts. |
 | `watchPaneRows` | `0` | Rows for the Tether pane when fleet.pane sets none (kept for configs written for a separate Watch pane). 0: not set. |
 | `watchPaneColumns` | `0` | Columns for the Tether pane when fleet.pane sets none (kept for configs written for a separate Watch pane). 0: not set. |
 | `housekeepingEnabled` | `true` | Tether folder, exclude lines, handoff template and handoff checks. |
@@ -290,7 +307,7 @@ off, TETHER_HANDOFF_FILE must be a path inside the session's folder`; unset or e
 | Key | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `locked` | boolean | `false` | The file's values are final: the plugin options are not read at all (defaults, then the file), no other file is read, and the file fails closed. |
-| `network` | boolean | `true` | `false`: no `prs` poller runs (and so no PR health command), and a command poller or `fleet.annotate` whose program is `gh`, `curl`, `wget`, `ssh`, `scp`, or `git` with `fetch`, `pull`, `push`, `clone`, `ls-remote`, `remote` or `submodule` (or a `-c alias.*`), is refused. The program is matched by its file name, in any case, without `.exe` (or `.cmd`, `.bat`, `.com`). |
+| `network` | boolean | `true` | `false`: no `prs` or `issues` poller runs (and so no PR health command), and a command poller or `fleet.annotate` whose program is `gh`, `curl`, `wget`, `ssh`, `scp`, or `git` with `fetch`, `pull`, `push`, `clone`, `ls-remote`, `remote` or `submodule` (or a `-c alias.*`), is refused. The program is matched by its file name, in any case, without `.exe` (or `.cmd`, `.bat`, `.com`). |
 | `allowedCommands` | list of lists of strings | none | When set, a command runs only if its argv starts with one of these lists, exactly. It applies to every command Tether runs, its own included (`git rev-parse --git-path info/exclude` for housekeeping, `gh pr list` and `git -C <worktree> rev-parse` / `rev-list` for the PR guard), whether or not `network` is `false`. `[]` runs nothing. |
 | `plainOutput` | boolean | `false` | Everything Tether says is built from fixed templates filled only with ids, numbers and codes (see below). |
 

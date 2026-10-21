@@ -14,9 +14,9 @@ import { buildRows, GUARD_MARK, summary, tokens, type AgentLike, type RateLimit,
 import { lastRequest, liveTasks, metaDescription, metaModel, noteAppendedRow, subagentsDir } from '../src/fleet/transcript'
 import { Boxes, parseState, type WatchState } from '../src/fleet/boxes'
 import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
-import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type Poller, type WatchConfig } from '../src/watch/config'
+import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type IssuesPoller, type Poller, type WatchConfig } from '../src/watch/config'
 import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type WatchState as WatchStateData } from '../src/watch/boxes'
-import { agentFindings, fresh, readOutput, readPlainOutput, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen } from '../src/watch/findings'
+import { agentFindings, fresh, idleWakeDue, issueFindings, readOutput, readPlainOutput, requeue, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen, type Told } from '../src/watch/findings'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, withHandoffEnv, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, backedOff, continueText, describeCycle, forceCheckpoint, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
@@ -592,6 +592,19 @@ let delivering = false
 const steps = new Map<string, { at: number; context: number }>()
 /** When watch first saw each agent, for one that has made no request yet. */
 const firstSeen = new Map<string, number>()
+/** When the main loop's last turn ended (or watch started): the idle wake and a lost wake count from it. */
+let idleSince = 0
+/**
+ * A wake submitted that no main-loop turn has started for yet, with the findings it named: the next turn.start
+ * clears it; while the session sits idle `resendAfterMinutes` past it, its findings go back to be sent again.
+ */
+let awaiting: { at: number; pending: Pending[] } | undefined
+/** Until when a wake the engine refused holds the next one (0: none); the next main-loop turn lifts it. */
+let heldUntil = 0
+/** The last refusal's reason, so each new reason is told once. */
+let refusal = ''
+/** Subagent states that count as at work: the idle wake waits for none of them. */
+const AT_WORK = new Set(['pending', 'running', 'waiting'])
 
 /** When each poller's next timed run starts (epoch ms), for the countdown. */
 const nextAt = new Map<string, number>()
@@ -605,6 +618,7 @@ let stateError = ''
 /** The $.store keys of this config's seen-set and pending findings. */
 const seenKey = () => `seen:${storeSpace()}`
 const pendingKey = () => `pending:${storeSpace()}`
+const toldKey = () => `told:${storeSpace()}`
 const logKey = () => `log:${storeSpace()}`
 /** The store name; plainOutput keeps its own seen-set, findings and logs, so nothing told before it is told under it. */
 const storeSpace = () => (plain() ? `plain:${wcfg.storeName}` : wcfg.storeName)
@@ -628,8 +642,9 @@ async function loadWatchConfig($: any, watchReuse = false): Promise<void> {
     problems = parsed.problems
     if (!policy.network) {
       // `network: false`: the PR guard reads GitHub, so its pollers do not run
-      for (const p of wcfg.pollers) if (p.kind === 'prs') $.ui.log(`watch: ${p.id} is off (network is false)`)
-      wcfg = { ...wcfg, pollers: wcfg.pollers.filter(p => p.kind !== 'prs') }
+      // The issues poller reads GitHub too
+      for (const p of wcfg.pollers) if (p.kind === 'prs' || p.kind === 'issues') $.ui.log(`watch: ${p.id} is off (network is false)`)
+      wcfg = { ...wcfg, pollers: wcfg.pollers.filter(p => p.kind !== 'prs' && p.kind !== 'issues') }
     }
   }
   if (plain() && problems.length > 0) $.ui.log(`watch: ${problems.length} config problem${problems.length === 1 ? '' : 's'}`)
@@ -659,6 +674,26 @@ async function runCommand($: any, p: CommandPoller): Promise<{ findings?: Findin
     return out.ok ? { findings: out.findings } : { error: out.error }
   } catch (err) {
     return { error: plain() ? 'failed' : String(err) }
+  }
+}
+
+/** One run of an issues poller: every open issue carrying one of its labels, read with `gh` per label. */
+async function issuesFindings($: any, p: IssuesPoller): Promise<{ findings?: Finding[]; error?: string }> {
+  try {
+    const findings: Finding[] = []
+    for (const label of p.labels) {
+      const argv = ['gh', 'issue', 'list', '--state', 'open', '--label', label, '--limit', String(p.limit), '--json', 'number,updatedAt']
+      const r = await runChecked($, argv, { timeoutMs: p.timeoutMs, ...(p.cwd ? { cwd: p.cwd } : {}) })
+      if (r.refused) return { error: r.refused }
+      if (r.exitCode !== 0) {
+        const why = String(r.stderr ?? '').trim().split('\n').slice(-1)[0] ?? ''
+        return { error: plain() ? `exit ${r.exitCode}` : `gh issue list: exit ${r.exitCode}${why ? ': ' + why.slice(0, 200) : ''}` }
+      }
+      findings.push(...issueFindings(label, JSON.parse(r.stdout)))
+    }
+    return { findings }
+  } catch (err) {
+    return { error: plain() ? 'bad-output' : String(err) }
   }
 }
 
@@ -718,6 +753,8 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
       }
     } else if (p.kind === 'prs') {
       result = await prsFindings($, p)
+    } else if (p.kind === 'issues') {
+      result = await issuesFindings($, p)
     } else {
       result = await runCommand($, p)
     }
@@ -734,8 +771,10 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
       return
     }
     const seen = ((await $.store.get(seenKey())) ?? {}) as Seen
-    const next = fresh(seen, p, result.findings, now)
+    const told = ((await $.store.get(toldKey())) ?? {}) as Told
+    const next = fresh(seen, p, result.findings, now, told)
     await $.store.set(seenKey(), next.seen)
+    if (next.told !== told) await $.store.set(toldKey(), next.told)
     lastRun.set(p.id, { at: now, ok: true, found: result.findings.length, told: next.fresh.length, ...(result.dropped ? { dropped: result.dropped } : {}) })
     if (next.fresh.length > 0) {
       await addLog($, p.id, now, next.fresh.map(f => f.text))
@@ -769,25 +808,78 @@ async function deliver($: any): Promise<void> {
 /** One delivery attempt; deliver() keeps two from overlapping. */
 async function deliverOnce($: any): Promise<void> {
   if (halted) return
-  const pending = await getPending($)
-  if (pending.length === 0) return
   const now = await $.clock.now()
+  // A wake the engine took but no turn started for, while the session sat idle: what it named is sent again
+  if (awaiting && !busy && now - Math.max(awaiting.at, idleSince) >= wcfg.resendAfterMinutes * 60_000) {
+    const lost = awaiting.pending
+    awaiting = undefined
+    lastWakeAt = -Infinity
+    if (lost.length > 0) await $.store.set(pendingKey(), requeue(lost, await getPending($)))
+    $.ui.log('watch: the last wake started no turn; it is sent again')
+  }
+  if (heldUntil && now >= heldUntil) heldUntil = 0
+  const held = awaiting !== undefined || heldUntil > 0
+  const pending = await getPending($)
+  if (pending.length === 0) return idleWake($, now, held)
   const draft = busy ? '' : ((await $.prompt.read())?.text ?? '')
-  const verdict = wakeVerdict(pending, { busy, draft, now, lastWakeAt, gapSeconds: wcfg.minWakeGapSeconds, deferMinutes: wcfg.deferWhileTypingMinutes })
+  const verdict = wakeVerdict(pending, { busy, draft, now, lastWakeAt, gapSeconds: wcfg.minWakeGapSeconds, deferMinutes: wcfg.deferWhileTypingMinutes, held })
   if (verdict !== 'go') return
-  const before = lastWakeAt
-  lastWakeAt = now
   // Clear first, so a second tick during the submit cannot send the same findings twice
   await $.store.set(pendingKey(), [])
-  try {
-    await $.prompt.submit({ text: wakeText(wcfg.wakePreamble, pending) })
-  } catch (err) {
-    // Put them back for the next try, which the gap must not hold up
-    await $.store.set(pendingKey(), [...pending, ...(await getPending($))])
-    lastWakeAt = before
-    $.ui.log(plain() ? 'watch: wake failed' : `watch: wake failed: ${err}`)
-  }
+  await submitWake($, now, wakeText(wcfg.wakePreamble, pending), pending)
   await status($)
+}
+
+/** Wakes the model when it has sat `idleWakeMinutes` idle with nothing found and no subagent at work. */
+async function idleWake($: any, now: number, held: boolean): Promise<void> {
+  // The cheap checks first, so an idle session with the option off reads nothing
+  if (wcfg.idleWakeMinutes <= 0 || busy || held) return
+  if (now - Math.max(idleSince, lastWakeAt) < wcfg.idleWakeMinutes * 60_000) return
+  let atWork = 0
+  try {
+    atWork = (((await $.agent.list()) ?? []) as Array<{ status: string }>).filter(a => AT_WORK.has(a.status)).length
+  } catch {
+    // An agent list that cannot be read is no reason to wake
+    return
+  }
+  const draft = (await $.prompt.read())?.text ?? ''
+  if (!idleWakeDue({ minutes: wcfg.idleWakeMinutes, busy, held, draft, agentsAtWork: atWork, now, idleSince, lastWakeAt })) return
+  await submitWake($, now, wcfg.idleWakeText.split('{minutes}').join(String(wcfg.idleWakeMinutes)), [])
+  await status($)
+}
+
+/**
+ * Submits one wake naming `pending` (already taken out of the store). It counts as sent until a main-loop turn
+ * starts; a refusal (a `drop` answer) or a failed submit puts the findings back and holds the next wake for
+ * `resendAfterMinutes`, or until the next turn starts.
+ */
+async function submitWake($: any, now: number, text: string, pending: Pending[]): Promise<void> {
+  const before = lastWakeAt
+  lastWakeAt = now
+  // Set before the submit, so a turn that starts while it is still being answered clears it
+  const mine = { at: now, pending }
+  awaiting = mine
+  let refused: string | undefined
+  try {
+    const r = await $.prompt.submit({ text })
+    if (r && typeof r === 'object' && typeof (r as any).drop === 'string') refused = (r as any).drop
+  } catch (err) {
+    refused = String(err)
+  }
+  if (refused === undefined) {
+    refusal = ''
+    return
+  }
+  if (awaiting === mine) awaiting = undefined
+  // Put them back for the next try, which the gap must not hold up
+  if (pending.length > 0) await $.store.set(pendingKey(), requeue(pending, await getPending($)))
+  lastWakeAt = before
+  heldUntil = now + wcfg.resendAfterMinutes * 60_000
+  if (refused !== refusal) {
+    $.ui.log(plain() ? 'watch: wake refused' : `watch: wake refused: ${refused}`)
+    $.ui.toast(plain() ? 'watch: a wake was refused' : `watch: a wake was refused (${refused}); it is tried again in ${wcfg.resendAfterMinutes} min or after the next turn starts`)
+  }
+  refusal = refused
 }
 
 /** One poller's box data: its countdown, its last run and its log. */
@@ -848,6 +940,7 @@ async function status($: any): Promise<void> {
   const parts = wcfg.tickSeconds > 0 ? wcfg.pollers.map(p => `${p.id} ${remaining(p, now)}`) : [`${wcfg.pollers.length} poller${wcfg.pollers.length === 1 ? '' : 's'}`]
   const pending = pendingCount
   if (pending) parts.push(`${pending} to tell`)
+  if (heldUntil > 0) parts.push('wake refused')
   const failing = wcfg.pollers.filter(p => lastRun.get(p.id)?.ok === false).map(p => p.id)
   if (failing.length) parts.push(`failing: ${failing.join(', ')}`)
   if (problems.length) parts.push(`${problems.length} config problem${problems.length === 1 ? '' : 's'}`)
@@ -933,6 +1026,7 @@ async function reloadAll($: any): Promise<void> {
 }
 
 const watchStart = async ($: any, e: any, next: any): Promise<any> => {
+  idleSince = await $.clock.now()
   await loadWatchConfig($, true)
   await getPending($)
   await schedule($)
@@ -947,6 +1041,7 @@ const watchComplete = async ($: any, e: any, next: any): Promise<any> => {
   const r = await next(e)
   if (!(e as any).agentId) {
     busy = false
+    idleSince = await $.clock.now()
     void deliver($)
   }
   return r
@@ -968,7 +1063,12 @@ const registerWatch: Register = (on) => {
 
   // Only the main loop's turns make the session busy; subagents run beside an idle session.
   on('turn.start', async ($, e, next) => {
-    busy = true
+    // A subagent's turn leaves the session free; a main-loop turn takes in the wake sent and lifts a refusal's hold
+    if (!(e as any).agentId) {
+      busy = true
+      awaiting = undefined
+      heldUntil = 0
+    }
     return next(e)
   })
 

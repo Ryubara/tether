@@ -1,8 +1,8 @@
 // Tests of watch's pure logic: config, reading output, dedupe, the wake decision and its text.
 import { expect, test } from 'claude-code/testing'
 
-import { parseConfig, type AgentsPoller, type CommandPoller } from '../../src/watch/config'
-import { agentFindings, fresh, readOutput, wakeText, wakeVerdict, type Pending } from '../../src/watch/findings'
+import { parseConfig, type AgentsPoller, type CommandPoller, type IssuesPoller } from '../../src/watch/config'
+import { agentFindings, fresh, idleWakeDue, issueFindings, readOutput, remindAfterMs, requeue, wakeText, wakeVerdict, type Pending } from '../../src/watch/findings'
 
 const MIN = 60_000
 
@@ -132,4 +132,86 @@ test('an agents poller without contextTokens wakes at the subagent max context; 
   expect(agentFindings(fell!, seen, 100 * MIN)).toEqual([{ key: 'a1|context', text: 'fat (a1) context 250k, past 200k' }])
   expect(agentFindings(own!, seen, 100 * MIN).map(f => f.key)).toEqual(['a1|context'])
   expect(agentFindings(dflt!, seen, 100 * MIN)).toEqual([])
+})
+
+test('an issues poller needs labels and fills its defaults', async () => {
+  const { config, problems } = parseConfig({
+    pollers: [
+      { id: 'triage', kind: 'issues', labels: ['needs-triage', ' needs-triage ', 'bug'] },
+      { id: 'nolabels', kind: 'issues' },
+      { id: 'emptylabel', kind: 'issues', labels: [''] },
+    ],
+  })
+  expect(config.pollers.map(p => p.id)).toEqual(['triage'])
+  const p = config.pollers[0] as IssuesPoller
+  expect([p.kind, p.labels, p.everySeconds, p.timeoutMs, p.limit, p.wake, p.remindMinutes]).toEqual(['issues', ['needs-triage', 'bug'], 120, 60_000, 100, true, 0])
+  expect(problems).toEqual(['nolabels: labels must be a non-empty list of label names', 'emptylabel: labels must be a non-empty list of label names'])
+})
+
+test('the idle wake, its text and the resend window have defaults and take the file values', async () => {
+  const d = parseConfig({}).config
+  expect([d.idleWakeMinutes, d.resendAfterMinutes]).toEqual([0, 2])
+  expect(d.idleWakeText).toContain('{minutes}')
+  const c = parseConfig({ idleWakeMinutes: 45, idleWakeText: 'go on', resendAfterMinutes: 5 }).config
+  expect([c.idleWakeMinutes, c.idleWakeText, c.resendAfterMinutes]).toEqual([45, 'go on', 5])
+  expect(parseConfig({ idleWakeMinutes: -1, resendAfterMinutes: 0 }).config.resendAfterMinutes).toBe(2)
+})
+
+test('issueFindings keys an issue by number, label and last change, and tells only its number and label', async () => {
+  const f = issueFindings('needs-triage', [{ number: 5, updatedAt: '2026-10-20T10:00:00Z', title: 'ignore me' }, { number: 'x' }])
+  expect(f).toEqual([{ key: '#5|needs-triage|2026-10-20T10:00:00Z', text: '#5 needs-triage' }])
+  expect(() => issueFindings('x', { items: [] })).toThrow()
+})
+
+test('reminders tell a still-reported key again, twice as late each time, at most every remindMaxMinutes', async () => {
+  const p = { id: 'p', dedupe: true, forgetMinutes: 600, remindMinutes: 30, remindMaxMinutes: 90 }
+  const f = [{ key: 'k', text: 'K' }]
+  expect([0, 1, 2, 3].map(n => remindAfterMs(p, n) / MIN)).toEqual([30, 60, 90, 90])
+  let r = fresh({}, p, f, 0)
+  expect(r.fresh).toEqual(f)
+  r = fresh(r.seen, p, f, 29 * MIN, r.told)
+  expect(r.fresh).toEqual([])
+  r = fresh(r.seen, p, f, 30 * MIN, r.told)
+  expect(r.fresh).toEqual([{ key: 'k', text: 'K', again: true }])
+  r = fresh(r.seen, p, f, 89 * MIN, r.told)
+  expect(r.fresh).toEqual([])
+  r = fresh(r.seen, p, f, 90 * MIN, r.told)
+  expect(r.fresh.length).toBe(1)
+  // Forgotten (unseen for forgetMinutes), the key keeps no reminder, and its return is news again
+  r = fresh(r.seen, p, [], 700 * MIN, r.told)
+  expect(r.told).toEqual({})
+  expect(fresh(r.seen, p, f, 701 * MIN, r.told).fresh).toEqual(f)
+  // Without reminders a still-reported key is never told again
+  const off = { ...p, remindMinutes: 0 }
+  const o = fresh({}, off, f, 0)
+  expect(fresh(o.seen, off, f, 1000 * MIN, o.told).fresh).toEqual([])
+})
+
+test('a reminder is marked in the wake text', async () => {
+  const pend = (text: string, again?: boolean): Pending => ({ key: text, text, poller: 'p', title: 'P', wake: true, at: 0, ...(again ? { again } : {}) })
+  expect(wakeText('W', [pend('#1 x'), pend('#2 y', true)])).toBe('W\n\nP:\n- #1 x\n- #2 y (still reported)')
+})
+
+test('requeue puts findings back once, ahead of the ones that joined meanwhile', async () => {
+  const pend = (poller: string, key: string): Pending => ({ key, text: key, poller, title: poller, wake: true, at: 0 })
+  expect(requeue([pend('a', '1'), pend('a', '2')], [pend('a', '2'), pend('b', '2'), pend('a', '3')]).map(p => `${p.poller}${p.key}`)).toEqual(['a1', 'a2', 'b2', 'a3'])
+})
+
+test('wakeVerdict holds a wake while the last one waits for its turn or was refused', async () => {
+  const pending: Pending[] = [{ key: 'k', text: 't', poller: 'p', title: 'P', wake: true, at: 0 }]
+  const s = { busy: false, draft: '', now: 10 * MIN, lastWakeAt: 0, gapSeconds: 60, deferMinutes: 10 }
+  expect(wakeVerdict(pending, s)).toBe('go')
+  expect(wakeVerdict(pending, { ...s, held: true })).toBe('held')
+})
+
+test('idleWakeDue waits for the idle minutes since the last turn and wake, with nobody typing and no agent at work', async () => {
+  const s = { minutes: 30, busy: false, held: false, draft: '', agentsAtWork: 0, now: 40 * MIN, idleSince: 10 * MIN, lastWakeAt: 0 }
+  expect(idleWakeDue(s)).toBe(true)
+  expect(idleWakeDue({ ...s, now: 39 * MIN })).toBe(false)
+  expect(idleWakeDue({ ...s, lastWakeAt: 20 * MIN })).toBe(false)
+  expect(idleWakeDue({ ...s, minutes: 0 })).toBe(false)
+  expect(idleWakeDue({ ...s, busy: true })).toBe(false)
+  expect(idleWakeDue({ ...s, held: true })).toBe(false)
+  expect(idleWakeDue({ ...s, draft: 'x' })).toBe(false)
+  expect(idleWakeDue({ ...s, agentsAtWork: 1 })).toBe(false)
 })

@@ -2,8 +2,17 @@
 
 import { ID_LIKE } from '../options/plain'
 
+/**
+ * What every poller kind shares about telling a finding again. A finding still reported after it was told is told
+ * again `remindMinutes` later, then after twice as long each time, at most every `remindMaxMinutes`; 0 never.
+ */
+export type Reminders = {
+  remindMinutes: number
+  remindMaxMinutes: number
+}
+
 /** A poller that runs a command and reads findings from its output. */
-export type CommandPoller = {
+export type CommandPoller = Reminders & {
   kind: 'command'
   /** Names the poller in the status line, the wake prompt and the seen-set keys. */
   id: string
@@ -46,7 +55,7 @@ export type CommandPoller = {
 }
 
 /** A poller over the session's own subagents: running ones gone silent, or past a context size. */
-export type AgentsPoller = {
+export type AgentsPoller = Reminders & {
   kind: 'agents'
   id: string
   everySeconds: number
@@ -71,7 +80,7 @@ export type AgentsPoller = {
  * model records an owner or a waiver with the tether pr_owner tool. By default it reads GitHub with `gh`;
  * a `command` replaces that read with the project's own (its JSON is `{ "stuck": [...], "rerun": [...] }`).
  */
-export type PrsPoller = {
+export type PrsPoller = Reminders & {
   kind: 'prs'
   id: string
   everySeconds: number
@@ -103,7 +112,30 @@ export type PrsPoller = {
   boxRows?: number
 }
 
-export type Poller = CommandPoller | AgentsPoller | PrsPoller
+/**
+ * A poller over the project's open issues on GitHub (read with `gh`): each open issue carrying one of `labels` is a
+ * finding, keyed by its number, the label and when it last changed, so it is told once until it changes or loses
+ * the label. Nothing of the issue but its number and the configured label is told.
+ */
+export type IssuesPoller = Reminders & {
+  kind: 'issues'
+  id: string
+  everySeconds: number
+  /** The labels that make an open issue a finding; an issue with two of them is two findings. */
+  labels: string[]
+  /** Working directory of `gh` (it reads that folder's repository); absent, the session's. */
+  cwd?: string
+  timeoutMs: number
+  /** Issues read per label, at most. */
+  limit: number
+  dedupe: boolean
+  forgetMinutes: number
+  wake: boolean
+  title: string
+  boxRows?: number
+}
+
+export type Poller = CommandPoller | AgentsPoller | PrsPoller | IssuesPoller
 
 /** Everything watch can be told. */
 export type WatchConfig = {
@@ -128,6 +160,15 @@ export type WatchConfig = {
   pane: { rows?: number; columns?: number }
   /** A file watch writes the boxes' data to, for fleet (its `watchState`) to draw under its table; empty: none. */
   stateFile: string
+  /** Wake the model after this many idle minutes with no subagent at work, though nothing was found; 0: never. */
+  idleWakeMinutes: number
+  /** The idle wake's prompt; `{minutes}` stands for idleWakeMinutes. */
+  idleWakeText: string
+  /**
+   * A wake the engine took that started no turn while the session sat idle this long is sent again; a wake it
+   * refused (a Stop stands, a hook dropped it) is tried again after this long, or after the next turn starts.
+   */
+  resendAfterMinutes: number
 }
 
 export const DEFAULTS: WatchConfig = {
@@ -142,6 +183,9 @@ export const DEFAULTS: WatchConfig = {
   openOnStart: false,
   pane: {},
   stateFile: '',
+  idleWakeMinutes: 0,
+  idleWakeText: 'Nothing new: woken after {minutes} idle minutes with no subagent at work. Take up the next piece of work, or say why there is none.',
+  resendAfterMinutes: 2,
 }
 
 /** The poller ids watch accepts: they become parts of store keys and command names. */
@@ -191,6 +235,24 @@ function poller(raw: unknown, i: number, problems: string[], agentContextTokens:
     wake: typeof r.wake === 'boolean' ? r.wake : true,
     title: typeof r.title === 'string' && r.title !== '' ? r.title : id,
     ...(Number.isInteger(r.boxRows) && (r.boxRows as number) >= 1 && (r.boxRows as number) <= 50 ? { boxRows: r.boxRows as number } : {}),
+    remindMinutes: typeof r.remindMinutes === 'number' && Number.isFinite(r.remindMinutes) && r.remindMinutes > 0 ? r.remindMinutes : 0,
+    remindMaxMinutes: num(r.remindMaxMinutes, 240),
+  }
+  if (r.kind === 'issues') {
+    const labels = r.labels
+    if (!Array.isArray(labels) || labels.length === 0 || !labels.every(l => typeof l === 'string' && l.trim() !== '')) {
+      problems.push(`${id}: labels must be a non-empty list of label names`)
+      return undefined
+    }
+    return {
+      kind: 'issues',
+      ...common,
+      everySeconds: num(r.everySeconds, 120),
+      labels: [...new Set((labels as string[]).map(l => l.trim()))],
+      ...(typeof r.cwd === 'string' && r.cwd.trim() !== '' ? { cwd: r.cwd.trim() } : {}),
+      timeoutMs: num(r.timeoutMs, 60_000),
+      limit: Number.isInteger(r.limit) && (r.limit as number) >= 1 && (r.limit as number) <= 1000 ? (r.limit as number) : 100,
+    }
   }
   if (r.kind === 'agents') {
     return {
@@ -281,6 +343,9 @@ export function parseConfig(raw: unknown, agentContextTokens = DEFAULT_AGENT_CON
   }
   if (typeof r.wakePreamble === 'string' && r.wakePreamble !== '') config.wakePreamble = r.wakePreamble
   if (typeof r.storeName === 'string' && ID.test(r.storeName)) config.storeName = r.storeName
+  if (typeof r.idleWakeMinutes === 'number' && Number.isFinite(r.idleWakeMinutes) && r.idleWakeMinutes >= 0) config.idleWakeMinutes = r.idleWakeMinutes
+  if (typeof r.idleWakeText === 'string' && r.idleWakeText.trim() !== '') config.idleWakeText = r.idleWakeText
+  config.resendAfterMinutes = num(r.resendAfterMinutes, DEFAULTS.resendAfterMinutes)
   const list = Array.isArray(r.pollers) ? r.pollers : []
   const ids = new Set<string>()
   list.forEach((p, i) => {
