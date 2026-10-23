@@ -393,6 +393,11 @@ claude plugin test .
 The plugin names one hooks module, and the engine follows `$` only within the file it is passed in, so every
 part that touches `$` lives in `hooks/register.tsx`; the pure logic is in `src/` and tested in `tests/`.
 
+What waits to be told to the model is a queue of notices (`src/notices/`): the watch pollers and the agent guard
+raise them, and one set of delivery rules (not during a turn, not while you type, a gap between wakes, a refused or
+lost wake held and sent again) decides when a turn starts for them. The queue touches `$` only through the ports
+`hooks/register.tsx` hands it, so its rules are tested without the engine.
+
 ## Licence
 
 MIT.

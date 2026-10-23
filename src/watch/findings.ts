@@ -218,57 +218,6 @@ export function issueFindings(label: string, issues: unknown): Finding[] {
   return out
 }
 
-/** A finding waiting to be told, with the poller it came from. */
-export type Pending = Finding & { poller: string; title: string; wake: boolean; at: number }
-
-/** Why a wake does not go now, or `go`. */
-export type WakeVerdict = 'go' | 'nothing' | 'busy' | 'typing' | 'gap' | 'held'
-
-/**
- * Whether to start a turn now for the pending findings: never during a turn, nor while `held` (a wake sent waits
- * for its turn, or one refused waits to be tried again), not within the gap
- * after the last wake, and not while the person has a draft (until the oldest waited `deferMinutes`).
- */
-export function wakeVerdict(
-  pending: Pending[],
-  s: { busy: boolean; draft: string; now: number; lastWakeAt: number; gapSeconds: number; deferMinutes: number; held?: boolean },
-): WakeVerdict {
-  const waking = pending.filter(p => p.wake)
-  if (waking.length === 0) return 'nothing'
-  if (s.busy) return 'busy'
-  if (s.held) return 'held'
-  if (s.now - s.lastWakeAt < s.gapSeconds * 1000) return 'gap'
-  const oldest = Math.min(...waking.map(p => p.at))
-  if (s.draft.trim() !== '' && s.now - oldest < s.deferMinutes * 60_000) return 'typing'
-  return 'go'
-}
-
-/** The wake prompt: the preamble, then each poller's findings under its title (a reminder marked as one). */
-export function wakeText(preamble: string, pending: Pending[]): string {
-  const groups = new Map<string, string[]>()
-  // A reminder says so, so the model can tell it from news
-  for (const p of pending) groups.set(p.title, [...(groups.get(p.title) ?? []), p.again ? `${p.text} (still reported)` : p.text])
-  const parts = [preamble]
-  for (const [title, texts] of groups) parts.push(`\n${title}:\n` + texts.map(t => `- ${t}`).join('\n'))
-  return parts.join('\n')
-}
-
-/**
- * Puts findings back in the pending list (a wake that was refused or started no turn), keeping the ones that
- * joined meanwhile and telling each poller's key once.
- */
-export function requeue(back: Pending[], now: Pending[]): Pending[] {
-  const out: Pending[] = []
-  const keys = new Set<string>()
-  for (const p of [...back, ...now]) {
-    const k = `${p.poller} ${p.key}`
-    if (keys.has(k)) continue
-    keys.add(k)
-    out.push(p)
-  }
-  return out
-}
-
 /** What decides whether the idle wake goes now; see idleWakeDue. */
 export type IdleState = {
   minutes: number

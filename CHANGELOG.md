@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0-alpha.32
+
+- Changed: the queue of findings waiting to be told and the rules that start a turn for them (not during a turn, not
+  while you type, a gap between wakes, a refused wake held and tried again, a lost wake sent again) moved out of the
+  watch part into their own module, `src/notices/`. The agent guard's alerts and every poller's findings, the
+  `undecided` agents among them, now join the same queue through it. Nothing a user sees changes: the same store
+  keys, wake text, toasts and log lines, and the delivery tests moved to `tests/notices/` unchanged.
+
 ## 1.0.0-alpha.31
 
 - Added: an `issues` poller kind. It wakes the model once for each open GitHub issue carrying one of its `labels`,

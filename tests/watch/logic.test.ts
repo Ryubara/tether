@@ -1,8 +1,8 @@
-// Tests of watch's pure logic: config, reading output, dedupe, the wake decision and its text.
+// Tests of watch's pure logic: config, reading output, dedupe, reminders and the idle wake.
 import { expect, test } from 'claude-code/testing'
 
 import { parseConfig, type AgentsPoller, type CommandPoller, type IssuesPoller } from '../../src/watch/config'
-import { agentFindings, atWork, fresh, idleWakeDue, issueFindings, liveBackground, readOutput, remindAfterMs, requeue, wakeText, wakeVerdict, type Pending } from '../../src/watch/findings'
+import { agentFindings, atWork, fresh, idleWakeDue, issueFindings, liveBackground, readOutput, remindAfterMs } from '../../src/watch/findings'
 
 const MIN = 60_000
 
@@ -93,23 +93,6 @@ test('agentFindings flags silent running agents once per silence and big context
   expect(agentFindings({ ...p, includeWaiting: true }, [{ id: 'a2', status: 'waiting', label: 'waiter', lastStepAt: 10 * MIN }], now)[0]?.text).toBe('waiter (a2) waiting, silent 90 min')
 })
 
-test('wakeVerdict waits for the turn, the gap and a draft (up to the defer limit)', async () => {
-  const pend: Pending[] = [{ key: 'k', text: 't', poller: 'p', title: 'P', wake: true, at: 0 }]
-  const base = { busy: false, draft: '', now: 5 * MIN, lastWakeAt: 0, gapSeconds: 60, deferMinutes: 10 }
-  expect(wakeVerdict([], base)).toBe('nothing')
-  expect(wakeVerdict([{ ...pend[0]!, wake: false }], base)).toBe('nothing')
-  expect(wakeVerdict(pend, base)).toBe('go')
-  expect(wakeVerdict(pend, { ...base, busy: true })).toBe('busy')
-  expect(wakeVerdict(pend, { ...base, lastWakeAt: 4.5 * MIN })).toBe('gap')
-  expect(wakeVerdict(pend, { ...base, draft: 'half typed' })).toBe('typing')
-  expect(wakeVerdict(pend, { ...base, draft: 'half typed', now: 11 * MIN })).toBe('go')
-})
-
-test('wakeText groups findings under their poller titles', async () => {
-  const p = (title: string, text: string): Pending => ({ key: text, text, poller: title, title, wake: true, at: 0 })
-  expect(wakeText('New:', [p('PRs', 'one'), p('Disk', 'low'), p('PRs', 'two')])).toBe('New:\n\nPRs:\n- one\n- two\n\nDisk:\n- low')
-})
-
 test('enabled defaults on and turns watch off', async () => {
   expect(parseConfig({}).config.enabled).toBe(true)
   expect(parseConfig({ enabled: false }).config.enabled).toBe(false)
@@ -191,23 +174,6 @@ test('reminders tell a still-reported key again, twice as late each time, at mos
   const off = { ...p, remindMinutes: 0 }
   const o = fresh({}, off, f, 0)
   expect(fresh(o.seen, off, f, 1000 * MIN, o.told).fresh).toEqual([])
-})
-
-test('a reminder is marked in the wake text', async () => {
-  const pend = (text: string, again?: boolean): Pending => ({ key: text, text, poller: 'p', title: 'P', wake: true, at: 0, ...(again ? { again } : {}) })
-  expect(wakeText('W', [pend('#1 x'), pend('#2 y', true)])).toBe('W\n\nP:\n- #1 x\n- #2 y (still reported)')
-})
-
-test('requeue puts findings back once, ahead of the ones that joined meanwhile', async () => {
-  const pend = (poller: string, key: string): Pending => ({ key, text: key, poller, title: poller, wake: true, at: 0 })
-  expect(requeue([pend('a', '1'), pend('a', '2')], [pend('a', '2'), pend('b', '2'), pend('a', '3')]).map(p => `${p.poller}${p.key}`)).toEqual(['a1', 'a2', 'b2', 'a3'])
-})
-
-test('wakeVerdict holds a wake while the last one waits for its turn or was refused', async () => {
-  const pending: Pending[] = [{ key: 'k', text: 't', poller: 'p', title: 'P', wake: true, at: 0 }]
-  const s = { busy: false, draft: '', now: 10 * MIN, lastWakeAt: 0, gapSeconds: 60, deferMinutes: 10 }
-  expect(wakeVerdict(pending, s)).toBe('go')
-  expect(wakeVerdict(pending, { ...s, held: true })).toBe('held')
 })
 
 test('idleWakeDue waits for the idle minutes since the last turn, wake and agent at work, with nobody typing and nothing at work', async () => {

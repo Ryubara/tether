@@ -16,7 +16,9 @@ import { Boxes, parseState, type WatchState } from '../src/fleet/boxes'
 import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type IssuesPoller, type Poller, type WatchConfig } from '../src/watch/config'
 import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type WatchState as WatchStateData } from '../src/watch/boxes'
-import { agentFindings, atWork, fresh, idleWakeDue, issueFindings, liveBackground, readOutput, readPlainOutput, requeue, wakeText, wakeVerdict, type AgentSeen, type Finding, type Pending, type Seen, type Told } from '../src/watch/findings'
+import { agentFindings, atWork, fresh, idleWakeDue, issueFindings, liveBackground, readOutput, readPlainOutput, type AgentSeen, type Finding, type Seen, type Told } from '../src/watch/findings'
+import type { Notice } from '../src/notices/notice'
+import { Notices, type NoticePorts, type WakeRules } from '../src/notices/queue'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, withHandoffEnv, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, backedOff, continueText, describeCycle, forceCheckpoint, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
@@ -558,7 +560,8 @@ const registerFleet: Register = (on) => {
 
 
 // ---- WATCH ----
-// watch: run a project's pollers inside the session and wake the model only for what is new.
+// watch: run a project's pollers inside the session and wake the model only for what is new. What is new, and what
+// the agent guard raises, waits in the notice queue (src/notices), which decides when a wake goes.
 //
 // The hooks only wire Claude Code's events to the pure functions in ../src, which the tests cover.
 // Timers and module variables survive /clear; the seen-set and the findings not yet told live in
@@ -583,26 +586,12 @@ let watchTimers: Array<{ cancel: () => void }> = []
 /** Pollers with a run in flight: a slow command never runs twice at once. */
 const running = new Set<string>()
 const lastRun = new Map<string, LastRun>()
-/** Whether a main-loop turn is running. */
-let busy = false
-let lastWakeAt = -Infinity
-/** True while a delivery is deciding or submitting, so two ticks cannot send the same findings. */
-let delivering = false
+/** The notices waiting to be told, and the state of the wakes sent for them (src/notices). */
+const notices = new Notices()
 /** Subagents' last model request and context, from turn.step. */
 const steps = new Map<string, { at: number; context: number }>()
 /** When watch first saw each agent, for one that has made no request yet. */
 const firstSeen = new Map<string, number>()
-/** When the main loop's last turn ended (or watch started): the idle wake and a lost wake count from it. */
-let idleSince = 0
-/**
- * A wake submitted that no main-loop turn has started for yet, with the findings it named: the next turn.start
- * clears it; while the session sits idle `resendAfterMinutes` past it, its findings go back to be sent again.
- */
-let awaiting: { at: number; pending: Pending[] } | undefined
-/** Until when a wake the engine refused holds the next one (0: none); the next main-loop turn lifts it. */
-let heldUntil = 0
-/** The last refusal's reason, so each new reason is told once. */
-let refusal = ''
 /** When a subagent was last seen at work: the idle wake counts its idle minutes from it too. */
 let lastAtWork = 0
 /** The main loop's own background tasks (shells, monitors) live at its last Stop: the idle wake waits for them. */
@@ -612,8 +601,6 @@ let mainBackground = 0
 const nextAt = new Map<string, number>()
 /** Each poller's findings log, oldest first; kept in $.store so a reload keeps it. */
 let logs: Record<string, LogLine[]> = {}
-/** How many findings wait to be told, cached so the countdown tick need not read $.store. */
-let pendingCount = 0
 /** The last state-file failure logged, so a bad path is reported once. */
 let stateError = ''
 
@@ -655,12 +642,25 @@ async function loadWatchConfig($: any, watchReuse = false): Promise<void> {
   logs = saved && typeof saved === 'object' ? (saved as Record<string, LogLine[]>) : {}
 }
 
-/** The findings not yet told, from $.store. */
-async function getPending($: any): Promise<Pending[]> {
-  const v = await $.store.get(pendingKey())
-  const list = Array.isArray(v) ? (v as Pending[]) : []
-  pendingCount = list.length
-  return list
+/** What the notice queue needs from the plugin API (it may not touch `$` itself, see src/notices/queue.ts). */
+function noticePorts($: any): NoticePorts {
+  return {
+    now: () => $.clock.now(),
+    load: () => $.store.get(pendingKey()),
+    save: async list => {
+      await $.store.set(pendingKey(), list)
+    },
+    draft: async () => (await $.prompt.read())?.text ?? '',
+    submit: text => $.prompt.submit({ text }),
+    log: text => $.ui.log(text),
+    toast: text => $.ui.toast(text),
+    changed: () => status($),
+  }
+}
+
+/** The delivery settings from the watch config. */
+function wakeRules(): WakeRules {
+  return { gapSeconds: wcfg.minWakeGapSeconds, deferMinutes: wcfg.deferWhileTypingMinutes, resendAfterMinutes: wcfg.resendAfterMinutes, preamble: wcfg.wakePreamble, plain: plain() }
 }
 
 /** Runs one command poller and returns its findings, or an error. */
@@ -785,7 +785,7 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
       if (p.wake) {
         const add = next.fresh.map(f => ({ ...f, poller: p.id, title, wake: true, at: now }))
         // A reminder for a finding still waiting to be told joins it, not a second copy
-        await $.store.set(pendingKey(), requeue(await getPending($), add))
+        await notices.merge(noticePorts($), add)
       } else {
         for (const f of next.fresh) $.ui.log(`watch: ${title}: ${f.text}`)
       }
@@ -798,50 +798,17 @@ async function poll($: any, p: Poller, thenDeliver = true): Promise<void> {
   if (thenDeliver) await deliver($)
 }
 
-/** Starts a turn for the pending findings when the session is idle, nobody is typing and the gap has passed. */
+/** Starts a turn for the pending notices when the session is idle, nobody is typing and the gap has passed. */
 async function deliver($: any): Promise<void> {
-  if (delivering) return
-  delivering = true
-  try {
-    await deliverOnce($)
-  } finally {
-    delivering = false
-  }
-}
-
-/** One delivery attempt; deliver() keeps two from overlapping. */
-async function deliverOnce($: any): Promise<void> {
   if (halted) return
-  const now = await $.clock.now()
-  // A wake the engine took but no turn started for, while the session sat idle: what it named is sent again
-  if (awaiting && !busy && now - Math.max(awaiting.at, idleSince) >= wcfg.resendAfterMinutes * 60_000) {
-    const lost = awaiting.pending
-    awaiting = undefined
-    if (lost.length > 0) await $.store.set(pendingKey(), requeue(lost, await getPending($)))
-    $.ui.log('watch: the last wake started no turn; it is sent again')
-  }
-  if (heldUntil && now >= heldUntil) {
-    heldUntil = 0
-    // The status line drops `wake refused` now, not at the next countdown tick (there may be none)
-    await status($)
-  }
-  const held = awaiting !== undefined || heldUntil > 0
-  const pending = await getPending($)
-  if (pending.length === 0) return idleWake($, now, held)
-  const draft = busy ? '' : ((await $.prompt.read())?.text ?? '')
-  const verdict = wakeVerdict(pending, { busy, draft, now, lastWakeAt, gapSeconds: wcfg.minWakeGapSeconds, deferMinutes: wcfg.deferWhileTypingMinutes, held })
-  if (verdict !== 'go') return
-  // Clear first, so a second tick during the submit cannot send the same findings twice
-  await $.store.set(pendingKey(), [])
-  await submitWake($, now, wakeText(wcfg.wakePreamble, pending), pending)
-  await status($)
+  await notices.deliver(noticePorts($), wakeRules(), (now, held) => idleWake($, now, held))
 }
 
 /** Wakes the model when it has sat `idleWakeMinutes` idle with nothing found and no subagent at work. */
 async function idleWake($: any, now: number, held: boolean): Promise<void> {
   // The cheap checks first, so an idle session with the option off reads nothing
-  if (wcfg.idleWakeMinutes <= 0 || busy || held) return
-  if (now - Math.max(idleSince, lastWakeAt, lastAtWork) < wcfg.idleWakeMinutes * 60_000) return
+  if (wcfg.idleWakeMinutes <= 0 || notices.busy || held) return
+  if (now - Math.max(notices.idleSince, notices.lastWakeAt, lastAtWork) < wcfg.idleWakeMinutes * 60_000) return
   let working = 0
   try {
     // An agent that has stopped but still has background tasks (a build it waits on) counts as at work
@@ -856,44 +823,10 @@ async function idleWake($: any, now: number, held: boolean): Promise<void> {
     return
   }
   const draft = (await $.prompt.read())?.text ?? ''
-  const state = { minutes: wcfg.idleWakeMinutes, busy, held, draft, agentsAtWork: working, mainBackground, now, idleSince, lastAtWork, lastWakeAt }
+  const state = { minutes: wcfg.idleWakeMinutes, busy: notices.busy, held, draft, agentsAtWork: working, mainBackground, now, idleSince: notices.idleSince, lastAtWork, lastWakeAt: notices.lastWakeAt }
   if (!idleWakeDue(state)) return
-  await submitWake($, now, wcfg.idleWakeText.split('{minutes}').join(String(wcfg.idleWakeMinutes)), [])
+  await notices.submit(noticePorts($), wakeRules(), now, wcfg.idleWakeText.split('{minutes}').join(String(wcfg.idleWakeMinutes)), [])
   await status($)
-}
-
-/**
- * Submits one wake naming `pending` (already taken out of the store). It counts as sent until a main-loop turn
- * starts; a refusal (a `drop` answer) or a failed submit puts the findings back and holds the next wake for
- * `resendAfterMinutes`, or until the next turn starts.
- */
-async function submitWake($: any, now: number, text: string, pending: Pending[]): Promise<void> {
-  const before = lastWakeAt
-  lastWakeAt = now
-  // Set before the submit, so a turn that starts while it is still being answered clears it
-  const mine = { at: now, pending }
-  awaiting = mine
-  let refused: string | undefined
-  try {
-    const r = await $.prompt.submit({ text })
-    if (r && typeof r === 'object' && typeof (r as any).drop === 'string') refused = (r as any).drop
-  } catch (err) {
-    refused = String(err)
-  }
-  if (refused === undefined) {
-    refusal = ''
-    return
-  }
-  if (awaiting === mine) awaiting = undefined
-  // Put them back for the next try, which the gap must not hold up
-  if (pending.length > 0) await $.store.set(pendingKey(), requeue(pending, await getPending($)))
-  lastWakeAt = before
-  heldUntil = now + wcfg.resendAfterMinutes * 60_000
-  if (refused !== refusal) {
-    $.ui.log(plain() ? 'watch: wake refused' : `watch: wake refused: ${refused}`)
-    $.ui.toast(plain() ? 'watch: a wake was refused' : `watch: a wake was refused (${refused}); it is tried again in ${wcfg.resendAfterMinutes} min or after the next turn starts`)
-  }
-  refusal = refused
 }
 
 /** One poller's box data: its countdown, its last run and its log. */
@@ -952,9 +885,9 @@ async function status($: any): Promise<void> {
   }
   const now = await $.clock.now()
   const parts = wcfg.tickSeconds > 0 ? wcfg.pollers.map(p => `${p.id} ${remaining(p, now)}`) : [`${wcfg.pollers.length} poller${wcfg.pollers.length === 1 ? '' : 's'}`]
-  const pending = pendingCount
+  const pending = notices.count
   if (pending) parts.push(`${pending} to tell`)
-  if (heldUntil > 0) parts.push('wake refused')
+  if (notices.refused) parts.push('wake refused')
   const failing = wcfg.pollers.filter(p => lastRun.get(p.id)?.ok === false).map(p => p.id)
   if (failing.length) parts.push(`failing: ${failing.join(', ')}`)
   if (problems.length) parts.push(`${problems.length} config problem${problems.length === 1 ? '' : 's'}`)
@@ -976,8 +909,8 @@ async function report($: any): Promise<string> {
     const what = !r ? 'not run yet' : r.ok ? `${r.found} found, ${r.told} new${r.dropped ? `, ${r.dropped} dropped` : ''}, ${ago(now, r.at)}` : `FAILED ${ago(now, r.at)}: ${r.error}`
     lines.push(`- ${p.id} (every ${p.everySeconds}s${p.wake ? '' : ', no wake'}${running.has(p.id) ? ', running' : ''}, next in ${remaining(p, now)}): ${what}`)
   }
-  const pending = await getPending($)
-  if (pending.length) lines.push(`to tell: ${pending.length} (${busy ? 'a turn is running' : 'next idle moment'})`)
+  const pending = await notices.pending(noticePorts($))
+  if (pending.length) lines.push(`to tell: ${pending.length} (${notices.busy ? 'a turn is running' : 'next idle moment'})`)
   if (plain() && problems.length > 0) lines.push(`config: ${problems.length} problem${problems.length === 1 ? '' : 's'}`)
   else for (const p of problems) lines.push(`config: ${p}`)
   return lines.join('\n')
@@ -1040,9 +973,9 @@ async function reloadAll($: any): Promise<void> {
 }
 
 const watchStart = async ($: any, e: any, next: any): Promise<any> => {
-  idleSince = await $.clock.now()
+  notices.idleSince = await $.clock.now()
   await loadWatchConfig($, true)
-  await getPending($)
+  await notices.pending(noticePorts($))
   await schedule($)
   try {
     await $.command.register({ ...registration(WATCH), immediate: true })
@@ -1054,8 +987,7 @@ const watchStart = async ($: any, e: any, next: any): Promise<any> => {
 const watchComplete = async ($: any, e: any, next: any): Promise<any> => {
   const r = await next(e)
   if (!(e as any).agentId) {
-    busy = false
-    idleSince = await $.clock.now()
+    notices.turnEnded(await $.clock.now())
     void deliver($)
   } else {
     // A subagent's turn ending is work: the idle wake counts its minutes from here
@@ -1086,9 +1018,7 @@ const registerWatch: Register = (on) => {
     // Any main-loop turn counts, the person's too: a wake submitted while they start one is taken in by their turn
     // or the next, so it is not resent. Telling the two apart would need the turn's prompt, which may be rewritten.
     if (!(e as any).agentId) {
-      busy = true
-      awaiting = undefined
-      heldUntil = 0
+      notices.turnStarted()
     }
     return next(e)
   })
@@ -1190,7 +1120,7 @@ async function checkpointTick($: any): Promise<void> {
   try {
     const now = await $.clock.now()
     // A draft is the person typing: it holds the cycle as a wake does (only the main loop's turns count as busy)
-    const draft = busy ? '' : ((await $.prompt.read())?.text ?? '')
+    const draft = notices.busy ? '' : ((await $.prompt.read())?.text ?? '')
     // A resumed session has made no request Tether saw: take the engine's figure until it does
     if (!((ledger.get('main')?.steps ?? 0) > 0)) await backfillMain($)
     const contextTokens = ledger.get('main')?.contextTokens ?? 0
@@ -1201,7 +1131,7 @@ async function checkpointTick($: any): Promise<void> {
     // New information: the person's and the main agent's messages, not the cycle's own prompts or their replies
     const messages = inProgress || mayAsk ? newInformation((await $.session.messages()) as Array<{ role: string; text?: string }>, cpCfg) : 0
     const problems = inProgress ? await handoffCheck($) : []
-    const observed: Observed = { now, contextTokens, busy, draft, messages, problems }
+    const observed: Observed = { now, contextTokens, busy: notices.busy, draft, messages, problems }
     const { state, action } = cycleStep(cpState, observed, cpCfg)
     cpState = state
     const line = describeCycle(cpState, observed, cpCfg)
@@ -1540,15 +1470,15 @@ function refreshMarks(store: GuardStore): void {
   }
 }
 
-/** Tells the coordinator: a toast, a log line, a line for /tether-guards; an alert also wakes the model like a watch finding. */
+/** Tells the coordinator: a toast, a log line, a line for /tether-guards; an alert also wakes the model, as a notice in the queue (src/notices). */
 async function reportGuard($: any, text: string, now: number, alert?: { id: string }): Promise<void> {
   guardNotes.push(`${clockOf(now)} ${text}`)
   if (guardNotes.length > 30) guardNotes.shift()
   $.ui.toast(`agent guard: ${text}`)
   $.ui.log(`agent guard: ${text}`)
   if (!alert || !wcfg.enabled) return
-  const add: Pending = { key: `${alert.id}|guard|${now}`, text, poller: 'agent-guard', title: 'Agent guard', wake: true, at: now }
-  await $.store.set(pendingKey(), [...(await getPending($)), add])
+  const add: Notice = { key: `${alert.id}|guard|${now}`, text, poller: 'agent-guard', title: 'Agent guard', wake: true, at: now }
+  await notices.append(noticePorts($), add)
   void deliver($)
 }
 

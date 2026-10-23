@@ -1,95 +1,7 @@
-// Tests of watch's hooks against the engine's test kit: polls, dedupe, and when a wake goes.
-import { expect, mock, test } from 'claude-code/testing'
+// Tests of watch's hooks against the engine's test kit: polls, dedupe, the idle wake and reminders.
+import { expect, test } from 'claude-code/testing'
 
-const SEC = 1000
-const MIN = 60 * SEC
-
-/** What a test's fake world records and answers. */
-type World = {
-  /** How the engine answers a wake: absent, it takes it and a turn starts; `no-turn`, it takes it and no turn starts; any other text, it drops it with that reason. */
-  answer?: string
-  submits: string[]
-  toasts: string[]
-  logs: string[]
-  statuses: string[]
-  /** What watch wrote with fs.write, by path. */
-  files: Record<string, string>
-  draft: string
-  /** The next process.run answers, in order; the last one repeats. */
-  runs: Array<{ exitCode: number; stdout: string; stderr?: string }>
-  agents: Array<{ id: string; status: string; description: string; type: string }>
-  /** Every command run, as argv. */
-  argv: string[][]
-}
-
-/** The turn the engine runs for a wake it took: a main-loop turn, started and completed. */
-async function pickUp($: any, n: number) {
-  await $.turn.start({ text: '', turnId: `wake-${n}` } as any)
-  await $.turn.complete({ turnId: `wake-${n}`, answer: '' } as any)
-}
-
-/** Starts watch with `config` as the file's watch section (`top` beside it) and the fake world's answers. */
-async function start($: any, on: any, config: unknown, world: World, top: Record<string, unknown> = {}) {
-  const clock = mock.clock(on)
-  mock.store(on)
-  on('session.start', () => ({ cwd: '/work' }))
-  on('command.register', () => ({ value: undefined }))
-  on('tool.register', () => ({ value: { tool: 'x' } }))
-  on('fs.exists', () => ({ value: true }))
-  on('fs.read', () => ({ value: JSON.stringify({ ...top, watch: config, housekeeping: { enabled: false }, conversations: { enabled: false } }) }))
-  on('classic.Stop', () => ({}))
-  on('process.run', ($: any, e: any) => {
-    world.argv.push([...e.argv])
-    const r = world.runs.length > 1 ? world.runs.shift()! : world.runs[0]!
-    return { value: { stderr: '', isStdoutTruncated: false, isStderrTruncated: false, ...r } }
-  })
-  on('agent.list', () => ({ value: world.agents }))
-  on('prompt.read', () => ({ value: { text: world.draft, cursor: world.draft.length } }))
-  on('prompt.submit', (_: any, e: any) => {
-    world.submits.push(e.text)
-    // The engine starts a turn for a prompt it takes, once the session is idle: a wake is picked up
-    if (world.answer === undefined) void Promise.resolve().then(() => pickUp($, world.submits.length))
-    else if (world.answer !== 'no-turn') return { drop: world.answer }
-    return { text: e.text, origin: e.origin }
-  })
-  on('ui.toast', ($: any, e: any) => {
-    world.toasts.push(e.text)
-    return { value: undefined }
-  })
-  on('ui.log', ($: any, e: any) => {
-    world.logs.push(e.text)
-    return { value: undefined }
-  })
-  on('ui.status', ($: any, e: any) => {
-    world.statuses.push(e.text)
-    return { value: undefined }
-  })
-  on('fs.write', ($: any, e: any) => {
-    world.files[e.path] = e.text
-    return { value: undefined }
-  })
-  // Every request is a 250k-context one (see bigStep)
-  on('turn.step', async function* ($: any, e: any) {
-    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { input_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 250_000 } }
-  })
-  on('ui.invalidate', () => ({ value: undefined }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.panes', () => ({ value: [] }))
-  on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
-  on('turn.complete', ($: any, e: any) => ({ text: e.answer ?? '' }))
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  return clock
-}
-
-/** A fresh world with one command answer. */
-function world(stdout: string, exitCode = 0): World {
-  return { submits: [], toasts: [], logs: [], statuses: [], files: {}, draft: '', runs: [{ exitCode, stdout }], agents: [], argv: [] }
-}
-
-const PRS = {
-  minWakeGapSeconds: 60,
-  pollers: [{ id: 'prs', title: 'Pull requests', command: ['check'], everySeconds: 300, match: '^- (.*)$', quietExitCodes: [3] }],
-}
+import { MIN, PRS, SEC, start, world } from './world'
 
 test('new findings wake the model once; the same findings again do not', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('HEADER\n- #12 fix-x: conflict\n- #13 add-y: checks failed\n')
@@ -107,35 +19,6 @@ test('new findings wake the model once; the same findings again do not', { timeo
   w.runs = [{ exitCode: 3, stdout: 'no new problem' }]
   await clock.advance(5 * MIN)
   expect(w.submits.length).toBe(2)
-})
-
-test('a draft in the prompt box holds the wake until it is sent or the defer limit passes', { timeoutMs: 30_000 }, async ($, on) => {
-  const w = world('- #12 fix-x: conflict\n')
-  w.draft = 'half typed'
-  const clock = await start($, on, { ...PRS, deferWhileTypingMinutes: 2 }, w)
-  await clock.advance(1 * MIN)
-  expect(w.submits).toEqual([])
-  await clock.advance(1 * MIN + 10 * SEC)
-  expect(w.submits.length).toBe(1)
-
-  // Typing again later: emptied box releases the wake at the next check
-  w.runs = [{ exitCode: 0, stdout: '- #15 new: conflict\n' }]
-  await clock.advance(5 * MIN - 1 * MIN)
-  expect(w.submits.length).toBe(1)
-  w.draft = ''
-  await clock.advance(6 * SEC)
-  expect(w.submits.length).toBe(2)
-})
-
-test('no wake while a turn runs; it goes when the turn completes', { timeoutMs: 30_000 }, async ($, on) => {
-  const w = world('- #12 fix-x: conflict\n')
-  const clock = await start($, on, PRS, w)
-  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
-  await clock.advance(30 * SEC)
-  expect(w.submits).toEqual([])
-  await $.turn.complete({ turnId: 't1', answer: '' } as any)
-  await clock.settle()
-  expect(w.submits.length).toBe(1)
 })
 
 test('a failing poller is logged once per reason and shows in /tether-watch', { timeoutMs: 30_000 }, async ($, on) => {
@@ -277,55 +160,6 @@ test('network false turns the issues poller off', { timeoutMs: 30_000 }, async (
   expect(w.logs).toContain('watch: triage is off (network is false)')
 })
 
-test('a wake the engine refuses is told once, and the findings are sent again after resendAfterMinutes', { timeoutMs: 30_000 }, async ($, on) => {
-  const w = world('- #12 fix-x: conflict\n')
-  w.answer = 'a Stop stands'
-  const clock = await start($, on, PRS, w)
-  await clock.advance(3 * SEC)
-  expect(w.submits.length).toBe(1)
-  expect(w.toasts.filter(t => t.includes('refused (a Stop stands)')).length).toBe(1)
-  expect(w.statuses.at(-1)).toContain('wake refused')
-  // Held for two minutes: no retry storm meanwhile
-  await clock.advance(1 * MIN)
-  expect(w.submits.length).toBe(1)
-  w.answer = undefined
-  await clock.advance(1 * MIN + 10 * SEC)
-  expect(w.submits.length).toBe(2)
-  expect(w.submits[1]).toContain('#12 fix-x: conflict')
-  await clock.advance(10 * MIN)
-  expect(w.submits.length).toBe(2)
-})
-
-test('a refused wake goes again as soon as a turn of the person has run', { timeoutMs: 30_000 }, async ($, on) => {
-  const w = world('- #12 fix-x: conflict\n')
-  w.answer = 'a Stop stands'
-  const clock = await start($, on, PRS, w)
-  await clock.advance(3 * SEC)
-  w.answer = undefined
-  await $.turn.start({ text: 'hi', turnId: 't1' } as any)
-  await $.turn.complete({ turnId: 't1', answer: '' } as any)
-  await clock.advance(6 * SEC)
-  expect(w.submits.length).toBe(2)
-})
-
-test('a wake taken that starts no turn is sent again once the session sat idle resendAfterMinutes', { timeoutMs: 30_000 }, async ($, on) => {
-  const w = world('- #12 fix-x: conflict\n')
-  w.answer = 'no-turn'
-  const clock = await start($, on, PRS, w)
-  await clock.advance(3 * SEC)
-  expect(w.submits.length).toBe(1)
-  // New findings meanwhile do not stack a second wake behind the first
-  w.runs = [{ exitCode: 0, stdout: '- #12 fix-x: conflict\n- #13 y: conflict\n' }]
-  await $.command.run({ command: 'tether-watch', args: 'run prs' } as any)
-  await clock.advance(1 * MIN + 30 * SEC)
-  expect(w.submits.length).toBe(1)
-  w.answer = undefined
-  await clock.advance(40 * SEC)
-  expect(w.submits.length).toBe(2)
-  expect(w.submits[1]).toMatch(/- #12 fix-x: conflict\n- #13 y: conflict$/)
-  expect(w.logs).toContain('watch: the last wake started no turn; it is sent again')
-})
-
 test('the idle wake goes after idleWakeMinutes with nothing found and no subagent at work', { timeoutMs: 30_000 }, async ($, on) => {
   const w = world('')
   const clock = await start($, on, { idleWakeMinutes: 30, pollers: [] }, w)
@@ -381,14 +215,6 @@ test('the idle wake is off by default', { timeoutMs: 30_000 }, async ($, on) => 
   const clock = await start($, on, { tickSeconds: 0, pollers: [] }, w)
   await clock.advance(2 * 60 * MIN)
   expect(w.submits).toEqual([])
-})
-
-test('a subagent turn leaves the session free for a wake', { timeoutMs: 30_000 }, async ($, on) => {
-  const w = world('- #12 fix-x: conflict\n')
-  const clock = await start($, on, PRS, w)
-  await $.turn.start({ text: 'work', turnId: 'a', agentId: 'a1' } as any)
-  await clock.advance(10 * SEC)
-  expect(w.submits.length).toBe(1)
 })
 
 test('a poller with remindMinutes tells a finding still reported again, marked, with backoff', { timeoutMs: 30_000 }, async ($, on) => {
