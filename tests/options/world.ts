@@ -95,6 +95,11 @@ export async function start($: any, on: any, w: World) {
     w.storeWrites.push(`${e.key}=${JSON.stringify(e.value)}`)
     return { value: undefined }
   })
+  on('store.delete', ($: any, e: any) => {
+    w.store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', () => ({ value: undefined }))
   on('tool.register', ($: any, e: any) => {

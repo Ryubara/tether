@@ -12,6 +12,7 @@ import { coldGuard } from '../src/fleet/guard'
 import { recordStep, type Ledger } from '../src/fleet/ledger'
 import { buildRows, GUARD_MARK, summary, tokens, type AgentLike, type RateLimit, type Row } from '../src/fleet/rows'
 import { lastRequest, liveTasks, metaDescription, metaModel, noteAppendedRow, subagentsDir } from '../src/fleet/transcript'
+import { endRoster, FORGET_MS, isOver, KEEP_MS, lastAssistantText, LOST_TITLE, lostContext, lostLine, markTold, observe, prune, readRoster, ROSTER_PREFIX, STALE_MS, statusLine, toTell, type RosterAgent } from '../src/fleet/lost'
 import { Boxes, parseState, type WatchState } from '../src/fleet/boxes'
 import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type IssuesPoller, type Poller, type WatchConfig } from '../src/watch/config'
@@ -229,6 +230,7 @@ async function refresh($: any): Promise<void> {
   await backfill($)
   await backfillMain($)
   const now = await $.clock.now()
+  await observeRoster($, now)
   fleetStatus = summary(currentRows(now), ledger.get('main')?.contextTokens, limits, coldToday, cfg)
   showStatus($)
   $.ui.invalidate('ui.render')
@@ -332,6 +334,172 @@ async function backfillMain($: any): Promise<void> {
   } catch {
     // Without the engine's figure the main context stays unknown until the next request
   }
+}
+
+// ---- Lost agents ----
+// Which subagents this session had at work, and which of them ended without a report (src/fleet/lost.ts). The record
+// is a module variable, so it survives /clear, and is saved in $.store under the session's id, so a restart or a
+// resume reads what the session before had at work. A lost agent is told once, at the next session start: as added
+// context of the SessionStart hook, or, after a clear (which raises no session start for a plugin), as a notice told
+// with the next prompt or at the end of the next turn.
+
+/** This process's record, by agent id. */
+let roster: Record<string, RosterAgent> = {}
+let rosterLoaded = false
+/** The store key the record was last saved under (a clear gives the session a new id, and so a new key). */
+let rosterKey: string | undefined
+/** What was last saved, and when: an unchanged record is saved once a minute, as the session's sign of life. */
+let rosterSaved = ''
+let rosterSavedAt = 0
+const ROSTER_ALIVE_MS = 60_000
+
+/** Loads the record this session saved before (a reload of the module, or a resume under the same id), once. */
+async function ensureRoster($: any): Promise<void> {
+  if (rosterLoaded) return
+  rosterLoaded = true
+  try {
+    const key = ROSTER_PREFIX + String(await $.session.id())
+    const saved = readRoster(await $.store.get(key))
+    if (saved && saved.cwd === String(await $.session.cwd())) {
+      roster = { ...saved.agents, ...roster }
+      rosterKey = key
+    }
+  } catch {
+    // Without the store the record starts empty
+  }
+}
+
+/** Saves the record under the session's current id (moving it after a clear); `ended` marks the session over. */
+async function saveRoster($: any, now: number, ended = false): Promise<void> {
+  try {
+    const id = String(await $.session.id())
+    const key = ROSTER_PREFIX + id
+    if (rosterKey !== undefined && rosterKey !== key) {
+      await $.store.delete(rosterKey)
+      rosterKey = undefined
+    }
+    if (Object.keys(roster).length === 0) {
+      if (rosterKey !== undefined) await $.store.delete(rosterKey)
+      rosterKey = undefined
+      return
+    }
+    const text = JSON.stringify(roster)
+    if (!ended && rosterKey === key && text === rosterSaved && now - rosterSavedAt < ROSTER_ALIVE_MS) return
+    // A slow refresh writes less often: `everyMs` tells the other sessions how long a silence means it is over
+    const everyMs = Math.max(ROSTER_ALIVE_MS, cfg.refreshSeconds * 1000)
+    await $.store.set(key, { session: id, cwd: String(await $.session.cwd()), aliveAt: now, everyMs, ...(ended ? { endedAt: now } : {}), agents: roster })
+    rosterKey = key
+    rosterSaved = text
+    rosterSavedAt = now
+  } catch {
+    // A record that cannot be saved is only lost to the next session
+  }
+}
+
+/** One look at the agent list for the record: who is at work, who ended with a report, who is lost. */
+async function observeRoster($: any, now: number): Promise<void> {
+  if (halted || !cfg.enabled) return
+  await ensureRoster($)
+  try {
+    await loadTasks($)
+  } catch {}
+  const byName = new Map([...names].map(([name, id]) => [id, name]))
+  const list = (agents as Array<AgentLike & { teammateId?: string }>).map(a => ({
+    id: a.id,
+    status: a.status,
+    label: plain() ? plainId(a.id) : (a.name ?? byName.get(a.id) ?? descriptions.get(a.id) ?? (a.description && a.description !== '(resumed)' ? a.description : undefined) ?? a.type ?? a.id),
+    tasks: [...(bgTasks.get(a.id) ?? [])].filter(t => !stoppedIds.has(t)).length,
+    teammate: a.teammateId !== undefined || a.type === 'teammate',
+  }))
+  roster = prune(observe(roster, list, id => ledger.get(id)?.lastStepAt, now), now, KEEP_MS)
+  await saveRoster($, now)
+}
+
+/** A lost agent's last status line: the last assistant text in its newest readable transcript, else its last stop's. */
+async function lastLineOf($: any, a: RosterAgent, now: number): Promise<string | undefined> {
+  if (plain()) return undefined
+  try {
+    await noteProjectDir($)
+    for (const base of await transcriptsOf($, a.id, now)) {
+      if ((await $.fs.stat(base + '.jsonl')).size > FS_READ_LIMIT) continue
+      const said = lastAssistantText(String(await $.fs.read(base + '.jsonl')))
+      if (said !== undefined) return statusLine(said)
+    }
+  } catch {
+    // An unreadable transcript leaves the line of its last stop
+  }
+  return a.line !== undefined ? statusLine(a.line) : undefined
+}
+
+/**
+ * The lost agents not told yet, as lines, marked told: this session's own, and those of every other session of this
+ * folder that is over (ended, or silent for STALE_MS), whose records then go. Agents the agent guard handed over,
+ * retired or recorded done are left out. Nothing while halted or with fleet off.
+ */
+async function takeLost($: any, now: number): Promise<string[]> {
+  if (halted || !cfg.enabled) return []
+  await ensureRoster($)
+  const lost: RosterAgent[] = []
+  try {
+    const guards = await guardStore($)
+    const skip = new Set<string>([
+      ...Object.entries(guards.decisions).filter(([, d]) => d.decision === 'retired' || d.decision === 'done').map(([id]) => id),
+      ...Object.entries(guards.actions).filter(([, act]) => act.handoverAt !== undefined).map(([id]) => id),
+    ])
+    const mine = toTell(roster, skip)
+    roster = markTold(roster, mine.map(a => a.id))
+    lost.push(...mine)
+    const session = String(await $.session.id())
+    const cwd = String(await $.session.cwd())
+    const keys = ((await $.store.keys()) as string[]).filter(k => k.startsWith(ROSTER_PREFIX) && k !== rosterKey && k !== ROSTER_PREFIX + session)
+    for (const key of keys) {
+      const r = readRoster(await $.store.get(key))
+      if (!r || now - r.aliveAt >= FORGET_MS) {
+        await $.store.delete(key)
+        continue
+      }
+      if (!isOver(r, { session, cwd, now }, STALE_MS)) continue
+      // An agent this session lists is its own now, judged by its own record
+      lost.push(...toTell(endRoster(r.agents), skip).filter(a => !agents.some(x => x.id === a.id)))
+      await $.store.delete(key)
+    }
+  } catch (err) {
+    $.ui.log(plain() ? 'fleet: the lost agents were not read' : `fleet: the lost agents were not read: ${err}`)
+  }
+  await saveRoster($, now)
+  const lines: string[] = []
+  for (const a of lost) lines.push(lostLine(a, await lastLineOf($, a, now), plain()))
+  if (lines.length > 0) $.ui.log(`fleet: ${lines.length} agent${lines.length === 1 ? '' : 's'} ended without a report, told at the session start`)
+  return lines
+}
+
+/** At a session start: a fresh look at the agents, then the lost ones as the SessionStart hook's added context. */
+async function lostAtStart($: any): Promise<string | undefined> {
+  // This event may come before the session.start that loads the settings
+  cfg = await loadConfig($)
+  if (halted || !cfg.enabled) return undefined
+  try {
+    agents = (await $.agent.list()) as AgentLike[]
+  } catch {}
+  const now = await $.clock.now()
+  await observeRoster($, now)
+  const lines = await takeLost($, now)
+  return lines.length > 0 ? lostContext(lines) : undefined
+}
+
+/** After a clear (no session start follows it for a plugin): the lost agents join the notice queue, told with the next prompt or turn end. */
+async function lostAfterClear($: any): Promise<void> {
+  if (halted || !cfg.enabled) return
+  try {
+    agents = (await $.agent.list()) as AgentLike[]
+  } catch {}
+  const now = await $.clock.now()
+  await observeRoster($, now)
+  const lines = await takeLost($, now)
+  if (lines.length === 0) return
+  // No wake of its own: the checkpoint's continue, or the person's next prompt, carries it
+  await notices.merge(noticePorts($), lines.map(text => ({ key: `lost|${text}`, text, poller: 'fleet', title: LOST_TITLE, wake: false, at: now })))
+  await status($)
 }
 
 /** True while an annotate run is in flight, so a slow adapter never runs twice at once. */
@@ -2073,17 +2241,41 @@ export const register: Register = (on, opts) => {
   // A clear ends the conversation, and no session start follows it: continue from the handoff if a checkpoint
   // asked for it. Looked at before the rest, so a failing hook beneath cannot keep it from happening.
   on('session.end', async ($, e, next) => {
-    if ((e as any).reason === 'clear') await checkpointAfterClear($, String((e as any).sessionId))
+    if ((e as any).reason === 'clear') {
+      // The agents the cleared conversation had at work go on; the ones it lost are told with the next prompt
+      void lostAfterClear($).catch(() => undefined)
+      await checkpointAfterClear($, String((e as any).sessionId))
+    } else if (!halted && cfg.enabled) {
+      // The session is over: the next one judges what it had at work at once, not once its record goes stale
+      await saveRoster($, await $.clock.now(), true)
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
   on('classic.SessionStart', async ($, e, next) => {
     const r: any = await next(e)
+    const add: string[] = []
     const text = await handoffContext($)
-    if (text === undefined) return r
-    // Added here, so the next prompt does not add it a second time
-    injectNext = false
-    $.ui.log(`checkpoint: added ${cpCfg.handoffFile} to the session`)
-    return { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), text] }
+    if (text !== undefined) {
+      // Added here, so the next prompt does not add it a second time
+      injectNext = false
+      $.ui.log(`checkpoint: added ${cpCfg.handoffFile} to the session`)
+      add.push(text)
+    }
+    try {
+      const lost = await lostAtStart($)
+      if (lost !== undefined) add.push(lost)
+    } catch {
+      // Only the lost-agent notice is missed
+    }
+    return add.length === 0 ? r : { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), ...add] }
+  }).catch(($, e, next) => next(e))
+  // A subagent's last message at each stop: the status line of a lost agent whose transcript is too big to read.
+  on('classic.SubagentStop', async ($, e, next) => {
+    const r: any = await next(e)
+    const id = (e as any).agent_id
+    const said = (e as any).last_assistant_message
+    if (!plain() && typeof id === 'string' && roster[id] && typeof said === 'string' && said.trim() !== '') roster[id] = { ...roster[id]!, line: statusLine(said, 1000) }
+    return r
   }).catch(($, e, next) => next(e))
   // After a clear, the first prompt carries the handoff as context. A prompt the person submits passes Tether's
   // prompt.submit; Tether's own continue does not (a plugin's call runs beneath its own hooks), so the engine's

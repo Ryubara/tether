@@ -28,6 +28,20 @@ run inside Claude Code (version 2.1.287 or later). See the
   default 300000) is the one size a subagent should not pass: the pane flags an agent at it (`retire`), and an
   `agents` poller of watch wakes you at it unless that poller sets its own `contextTokens`. `fleet.usageWarnPercent` (the `!` after a rate limit) is
   only shown with `fleet.showSession`, because only then does fleet read the rate limits.
+- **Lost agents.** Fleet keeps a record of the subagents it saw at work, in Claude Code's plugin store under the
+  session's id, so a `/clear`, a restart or a resume still has it. An agent ends with its report when its last turn
+  ends with nothing left to wake it. One that stops to wait on background work (a build, CI, a monitor) and is not
+  woken again before that work ends, one that leaves the agent list while at work, one that fails, and one at work when
+  the session that ran it ends never reported: it is lost. At the next session start Tether tells the model each lost
+  agent once, by name and id, with what it was doing and its last status line (the last assistant text in its
+  transcript, else its last message at a stop when the transcript is over 4 MB). A new or resumed session gets it as
+  the `SessionStart` hook's added context; after a clear, which raises no session start for a plugin, it is told with
+  the next prompt or at the end of the next turn, like the other notices. An agent the agent guard handed over,
+  retired or recorded done is not told, nor is one killed on purpose. Another session still at work in the same folder
+  keeps its own agents: a session's record counts as over when it ended, or has not been written for 5 minutes and
+  three of its writes (it is written once a minute, or once per `fleet.refreshSeconds` when that is longer, while it
+  has agents). Under `plainOutput` a lost agent is told by its id and `running`
+  or `waiting` alone, and its transcript is not read. Nothing is recorded or told while fleet is off.
 - **Watch.** Pollers that run inside the session: each finding is told once, and a model turn starts only for
   new findings, never during a turn or while you type. `/tether-watch` reports (it never stops polling) and opens
   the Tether pane, whose boxes show each poller's countdown and findings; `/tether-watch run`, `forget` and
