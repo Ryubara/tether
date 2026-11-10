@@ -27,7 +27,7 @@ test('a failing poller is logged once per reason and shows in /tether-watch', { 
   const clock = await start($, on, PRS, w)
   await clock.advance(3 * SEC)
   await clock.advance(10 * MIN)
-  expect(w.logs).toEqual(['watch: prs failed: exit 1: GitHub could not be read'])
+  expect(w.logs.filter(l => !l.startsWith('version '))).toEqual(['watch: prs failed: exit 1: GitHub could not be read'])
   const report: any = await $.command.run({ command: 'tether-watch', args: '' } as any)
   expect(report.text).toMatch(/- prs \(every 300s, next in [0-9:]+\): FAILED 0 min ago: exit 1: GitHub could not be read/)
   expect(w.submits).toEqual([])

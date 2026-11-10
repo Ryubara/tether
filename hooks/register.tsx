@@ -254,33 +254,73 @@ async function noteProjectDir($: any): Promise<void> {
   } catch {}
 }
 
-/** The transcript bases (`<dir>/agent-<id>`) of an agent, newest first; looked up again at most every 5 min. */
+/** How long a list of an agent's transcript files stands before the session folders are listed again. */
+const RELIST_MS = 30 * 60_000
+
+/**
+ * The transcript bases (`<dir>/agent-<id>`) of an agent, newest first. Claude Code writes an agent's rows in the
+ * folder of the session it runs under, so a /clear (a new session id) or a resume starts a new file beside the old
+ * ones, and each file holds only its own stretch: the newest is the one whose last request tells the size. The
+ * current session's folder is looked at on every call, the others listed again every 30 minutes (5 while none is
+ * found), and the files are ordered by their mtime now, not when they were found.
+ */
 async function transcriptsOf($: any, id: string, now: number): Promise<string[]> {
   const known = found.get(id)
-  if (known && (known.bases.length > 0 || now - known.at < 5 * 60_000)) return known.bases
-  const bases: Array<{ base: string; mtime: number }> = []
+  let bases = known?.bases ?? []
+  if (!known || now - known.at >= (known.bases.length > 0 ? RELIST_MS : 5 * 60_000)) {
+    bases = []
+    try {
+      const sessions = ((await $.fs.list(projectDir)) as Array<{ name: string; kind: string }>).filter(d => d.kind === 'dir')
+      for (const s of sessions) {
+        const base = `${projectDir}/${s.name}/subagents/agent-${id}`
+        if (await $.fs.exists(base + '.jsonl')) bases.push(base)
+      }
+    } catch {}
+    found.set(id, { at: now, bases })
+  }
   try {
-    const sessions = ((await $.fs.list(projectDir)) as Array<{ name: string; kind: string }>).filter(d => d.kind === 'dir')
-    for (const s of sessions) {
-      const base = `${projectDir}/${s.name}/subagents/agent-${id}`
-      if (await $.fs.exists(base + '.jsonl')) bases.push({ base, mtime: (await $.fs.stat(base + '.jsonl')).mtimeMs })
+    const current = `${projectDir}/${String(await $.session.id())}/subagents/agent-${id}`
+    if (!bases.includes(current) && (await $.fs.exists(current + '.jsonl'))) {
+      bases = [...bases, current]
+      found.set(id, { at: found.get(id)?.at ?? now, bases })
     }
   } catch {}
-  const sorted = bases.sort((x, y) => y.mtime - x.mtime).map(b => b.base)
-  found.set(id, { at: now, bases: sorted })
-  return sorted
+  if (bases.length < 2) return bases
+  const dated: Array<{ base: string; mtime: number }> = []
+  for (const base of bases) {
+    try {
+      dated.push({ base, mtime: (await $.fs.stat(base + '.jsonl')).mtimeMs })
+    } catch {
+      // A file that went away is left out
+    }
+  }
+  return dated.sort((x, y) => y.mtime - x.mtime).map(d => d.base)
 }
+
+/** Statuses of an agent that is over: its size no longer matters. */
+const OVER = new Set(['failed', 'killed'])
+/** A transcript written this long after the last request Tether saw may hold requests Tether did not see. */
+const STEP_SLACK_MS = 60_000
 
 /**
  * Fills in what fleet did not see itself, from Claude Code's transcript files: the last request
  * (time and context) of an agent with no ledger entry, and the description of a resumed agent,
  * which only the session that first started it recorded.
+ *
+ * A live agent's entry is checked too once its newest transcript changed after the last request Tether saw: steps
+ * that stop reaching this module (a reload, an agent carried over a /clear) must not freeze its size. A request
+ * read there replaces the entry only when it is newer. A transcript over the read limit cannot be read (`$.fs.read`
+ * rejects it); the size Tether kept in its store (`savedSizes`) stands in for it.
  */
 async function backfill($: any): Promise<void> {
   if (!projectDir) return
+  await loadSizes($)
   const now = await $.clock.now()
   for (const a of agents) {
-    const needsUsage = !ledger.has(a.id) || ledger.get(a.id)!.steps === 0
+    const saved = savedSizes.get(a.id)
+    if (saved && !ledger.has(a.id)) ledger.set(a.id, { id: a.id, lastStepAt: saved.at, contextTokens: saved.contextTokens, cacheWritten: 0, coldWritten: 0, steps: 0 })
+    const entry = ledger.get(a.id)
+    const needsUsage = !entry || entry.steps === 0 || !OVER.has(a.status)
     const needsName = !descriptions.has(a.id) && (!a.description || a.description === '(resumed)')
     if (!needsUsage && !needsName) continue
     const bases = await transcriptsOf($, a.id, now)
@@ -297,22 +337,64 @@ async function backfill($: any): Promise<void> {
       if (needsUsage && bases.length > 0) {
         const st = await $.fs.stat(bases[0] + '.jsonl')
         if (transcriptRead.get(a.id) === st.mtimeMs) continue
+        // A request Tether saw itself stands until the file moves on past it
+        if (entry && entry.steps > 0 && st.mtimeMs <= entry.lastStepAt + STEP_SLACK_MS) continue
         transcriptRead.set(a.id, st.mtimeMs)
         // The newest file with a request: a resumed agent's newest copy may hold none yet
         for (const base of bases) {
+          const size = base === bases[0] ? st.size : (await $.fs.stat(base + '.jsonl')).size
+          // Unreadable, and it may hold the newest request: an older copy's would be older still
+          if (size > FS_READ_LIMIT) break
           const last = lastRequest(await $.fs.read(base + '.jsonl'))
+          if (!last) continue
+          if (last.model && !agentModels.has(a.id)) agentModels.set(a.id, last.model)
           // steps 0 marks an entry read from the transcript; the next real request replaces it
-          if (last) {
-            if (last.model && !agentModels.has(a.id)) agentModels.set(a.id, last.model)
-            ledger.set(a.id, { id: a.id, lastStepAt: last.at, contextTokens: last.contextTokens, cacheWritten: 0, coldWritten: 0, steps: 0 })
-            break
-          }
+          if (!entry || last.at > entry.lastStepAt) ledger.set(a.id, { id: a.id, cacheWritten: 0, coldWritten: 0, steps: 0, ...entry, lastStepAt: last.at, contextTokens: last.contextTokens })
+          break
         }
       }
     } catch {
       // A transcript fleet cannot read only leaves the row's numbers blank
     }
   }
+}
+
+/** Each agent's last request as Tether last knew it, kept in its store so a reload or a restart still knows the size. */
+const savedSizes = new Map<string, { at: number; contextTokens: number }>()
+let sizesLoaded = false
+/** What was last written, so an unchanged map is not written again. */
+let sizesWritten = ''
+/** How long a kept size is worth keeping. */
+const SIZE_KEEP_MS = 2 * 24 * 60 * 60_000
+
+/** Reads the kept sizes once per load. */
+async function loadSizes($: any): Promise<void> {
+  if (sizesLoaded) return
+  sizesLoaded = true
+  try {
+    const kept = await $.store.get(`guards:sizes:${wcfg.storeName}`)
+    if (kept && typeof kept === 'object') {
+      for (const [id, v] of Object.entries(kept as Record<string, { at?: unknown; contextTokens?: unknown }>)) {
+        if (typeof v?.at === 'number' && typeof v.contextTokens === 'number') savedSizes.set(id, { at: v.at, contextTokens: v.contextTokens })
+      }
+    }
+    sizesWritten = JSON.stringify(Object.fromEntries(savedSizes))
+  } catch {
+    // Nothing kept: the sizes come from the requests and transcripts again
+  }
+}
+
+/** Keeps the size of each agent known from a request, dropping those not heard of for two days. */
+async function saveSizes($: any, seen: Array<{ id: string; lastStepAt: number; contextTokens?: number }>, now: number): Promise<void> {
+  await loadSizes($)
+  for (const a of seen) {
+    if (a.contextTokens !== undefined && (steps.has(a.id) || ledger.has(a.id))) savedSizes.set(a.id, { at: a.lastStepAt, contextTokens: a.contextTokens })
+  }
+  for (const [id, v] of savedSizes) if (now - v.at > SIZE_KEEP_MS) savedSizes.delete(id)
+  const text = JSON.stringify(Object.fromEntries(savedSizes))
+  if (text === sizesWritten) return
+  sizesWritten = text
+  await $.store.set(`guards:sizes:${wcfg.storeName}`, Object.fromEntries(savedSizes))
 }
 
 /** Set by a clear: the context the engine reports may still be the ended conversation's until a request is made. */
@@ -886,8 +968,11 @@ async function agentsSeen($: any, now: number): Promise<AgentSeen[]> {
   }
   return list.map(a => {
     if (!firstSeen.has(a.id)) firstSeen.set(a.id, now)
-    const s = steps.get(a.id)
-    const l = s ? undefined : ledger.get(a.id)
+    // The newer of the two: watch's own step, or the ledger (a step, or a transcript read when steps stopped coming)
+    const fromStep = steps.get(a.id)
+    const fromLedger = ledger.get(a.id)
+    const s = fromStep && !(fromLedger && fromLedger.lastStepAt > fromStep.at) ? fromStep : undefined
+    const l = s ? undefined : fromLedger
     return {
       id: a.id,
       status: a.status,
@@ -1401,6 +1486,7 @@ async function checkpointAfterClear($: any, endedId: string): Promise<void> {
   ledger.delete('main')
   mainClearedSinceStart = true
   if (halted) return
+  await noteVersion($).catch(() => undefined)
   // No session start follows a clear: reopen the pane here, and add the handoff to the next prompt
   openAtStart($)
   injectNext = cpCfg.injectHandoff
@@ -1425,6 +1511,26 @@ async function checkpointAfterClear($: any, endedId: string): Promise<void> {
     $.clock.after(NEW_SESSION_POLL_MS, look)
   }
   await look()
+}
+
+/**
+ * The version this module runs, from its own plugin.json, read once per load. A /clear keeps the module, so an
+ * update installed since is not what runs until a restart: the log line after the clear says which one does.
+ */
+let loadedVersion: string | undefined
+
+/** Logs the version this module runs (`version X loaded from <root>`), at each start and after each clear. */
+async function noteVersion($: any): Promise<void> {
+  if (loadedVersion === undefined) {
+    try {
+      const v = (JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))) as { version?: unknown }).version
+      loadedVersion = typeof v === 'string' && v.trim() !== '' ? v.trim() : 'unknown'
+    } catch {
+      loadedVersion = 'unknown'
+    }
+  }
+  // Under plainOutput no path: it can carry the user's name
+  $.ui.log(plain() ? `version ${loadedVersion} loaded` : `version ${loadedVersion} loaded from ${$.plugin.root}`)
 }
 
 // ---- GUARDS ----
@@ -1838,6 +1944,7 @@ async function guardTick($: any): Promise<void> {
   try {
     const now = await $.clock.now()
     const seen = await agentsSeen($, now)
+    if (!halted) await saveSizes($, seen, now).catch(() => undefined)
     const safely = (plan: Plan) => runPlan($, plan, now).catch(err => failedOnce($, plan.id, plain() ? `${plan.kind} of ${plan.id} failed` : `${plan.kind} of ${plan.label} (${plan.id}) failed: ${err}`))
     if (gCfg.auto) {
       const store = await guardStore($)
@@ -2065,6 +2172,7 @@ async function guardsReport($: any): Promise<string> {
   for (const u of lastUndecided) lines.push(`- ${u.text}`)
   lines.push(`agent guard: ${gCfg.auto ? 'acts by itself' : 'asks only'}, ${gCfg.leadMinutes} min before the cache expires; hands over from ${tokens(gCfg.handoverTokens)}`)
   for (const n of guardNotes.slice(-10)) lines.push(`- ${n}`)
+  lines.push(`tether version: ${loadedVersion ?? 'unknown'}`)
   return lines.join('\n')
 }
 
@@ -2202,6 +2310,7 @@ export const register: Register = (on, opts) => {
       await $.command.register({ ...registration(CHECKPOINT), immediate: true })
     } catch {}
     const r = await fleetStart($, e, (e2: any) => watchStart($, e2, next))
+    if (!halted) await noteVersion($).catch(() => undefined)
     // Once both parts have read their settings: the one pane, when either part asks for it
     openAtStart($)
     mainClearedSinceStart = false

@@ -73,7 +73,8 @@ test('TETHER_CONFIG wins over the configPath option and the project file', { tim
   const w = world({ env: { TETHER_CONFIG: ZONE }, files })
   const clock = await start($, on, w)
   await clock.advance(1 * MIN)
-  expect(w.reads.filter(p => p.endsWith('.json')).map(p => p.replace(/^[A-Za-z]:/, ''))).toEqual([ZONE])
+  // Its own manifest (the version it logs) aside, no config but the zone's is read
+  expect(w.reads.filter(p => p.endsWith('.json') && !p.endsWith('/.claude-plugin/plugin.json')).map(p => p.replace(/^[A-Za-z]:/, ''))).toEqual([ZONE])
   expect(w.runs.some(a => a.join(' ') === 'node zone.js')).toBe(true)
   expect(w.runs.some(a => a.join(' ') === 'node project.js')).toBe(false)
 })

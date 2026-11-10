@@ -174,6 +174,13 @@ run inside Claude Code (version 2.1.287 or later). See the
     `SendMessage` would, at its whole context: start a fresh agent instead and record it `done` or `retired`), and a
     stopped one with background work when `auto` or `sizeHandover` is off. These are the agents the pane flags
     `retire`. A retired or done record, a handover under way, or the coordinator's `kept-warm` past the line ends it.
+  - **Where the size comes from.** Each model request of the agent (`turn.step`), else its newest transcript. Claude
+    Code writes an agent's rows in the folder of the session it runs under, so after a `/clear` or a resume its new
+    stretch is in a new session folder beside the old copy: Tether looks in the current session's folder at every
+    tick, lists the others again every 30 minutes, and reads the newest file, also for an agent whose requests it saw
+    once and then stopped seeing. A transcript over 4 MB cannot be read (`$.fs.read` rejects it, and an agent near the
+    line has one that big), so Tether keeps each agent's last size in its plugin store (`guards:sizes:<storeName>`,
+    two days): after a reload or a restart that size stands until a newer request or a readable newer file replaces it.
   - **Tasks the agent ends itself.** A background task ends at its `<task-notification>`, or when the agent stops it
     with its own `TaskStop` (the answer "Successfully stopped task: <id>" is the only trace; no notification
     follows). Only TaskStop's own result counts, read from its structured record or, in an appended row, from a row
@@ -231,7 +238,10 @@ run inside Claude Code (version 2.1.287 or later). See the
 - **Stop hook.** The end of a turn is blocked while a PR problem or an agent the guard has not dealt with is open,
   at most `stop.maxBlocks` times in a row for the same reason, and once for each set of notices still waiting (they
   are told in the reason and leave the queue; the limit counts the guards' reason alone). `/tether-guards` prints
-  what is open and what the agent guard did.
+  what is open, what the agent guard did and the version running.
+- **The version running.** Tether logs `version <X> loaded from <folder>` at each start and after each `/clear` (the
+  line shows in the transcript as `tether: version ...`). A `/clear` keeps the loaded module, so an update installed
+  since runs only after a restart: the line after the clear names the version that is running, not the installed one.
 - **Housekeeping.** Tether's folder, the handoff and a project-relative config go into `.git/info/exclude` (no
   tracked file is touched); a missing `HANDOFF.md` is made from the template; a Write of it that breaks the
   template is refused. Tether keeps its own state in Claude Code's plugin store, never in `~/.claude/tether/`: the
