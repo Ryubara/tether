@@ -21,8 +21,13 @@ export type Owner = {
  */
 export type Decision = { decision: 'retired' | 'done' | 'kept-warm'; note: string; at: string; /** Epoch ms of the record; 0 when unknown (an older store). */ atMs: number }
 
-/** The kinds of problem the guard tells the coordinator about, each told once per cycle. */
-export type AlertKind = 'handover-late' | 'expired' | 'warm-max' | 'still-waiting'
+/**
+ * The kinds of problem the guard tells the coordinator about, each told once per cycle; `retire-line` (an agent past
+ * the retire line that Tether does not hand over itself) and `handover-failed` (its own retire handover could not be
+ * sent) are told once per agent.
+ */
+export const ALERT_KINDS = ['handover-late', 'expired', 'warm-max', 'still-waiting', 'retire-line', 'handover-failed'] as const
+export type AlertKind = (typeof ALERT_KINDS)[number]
 
 /** What Tether itself did about a stopped agent (the guard's automatic actions). */
 export type AgentAction = {
@@ -101,7 +106,7 @@ export function readStore(raw: unknown): GuardStore {
     if (!a || typeof a.warms !== 'number') continue
     const time = (t: unknown) => (typeof t === 'number' && Number.isFinite(t) ? t : undefined)
     const alerts: AgentAction['alerts'] = {}
-    for (const kind of ['handover-late', 'expired', 'warm-max', 'still-waiting'] as const) {
+    for (const kind of ALERT_KINDS) {
       const at = time((a.alerts as Record<string, unknown> | undefined)?.[kind])
       if (at !== undefined) alerts[kind] = at
     }

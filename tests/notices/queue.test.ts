@@ -236,3 +236,41 @@ test('a wake submitted for no notices (the idle wake) is held and resent like an
   expect(q.held).toBe(false)
   expect(f.stored).toBeUndefined()
 })
+
+test('take empties the queue for a turn boundary, waking or not, and a wake then has nothing to send', async () => {
+  const f = fake()
+  const q = new Notices()
+  q.turnStarted()
+  await q.append(ports(f), notice('a', f.now))
+  await q.append(ports(f), notice('b', f.now, { wake: false }))
+  // A turn runs: no wake goes
+  await q.deliver(ports(f), RULES)
+  expect(f.submits).toEqual([])
+  const told = await q.take(ports(f))
+  expect(told.map(n => n.key)).toEqual(['a', 'b'])
+  expect(f.stored).toEqual([])
+  expect(q.count).toBe(0)
+  q.turnEnded(f.now)
+  f.now += 2 * MIN
+  await q.deliver(ports(f), RULES)
+  expect(f.submits).toEqual([])
+  expect(await q.take(ports(f))).toEqual([])
+})
+
+test('a notice that may not wake waits for a boundary or the next wake, and does not hold the idle wake back', async () => {
+  const f = fake()
+  const q = new Notices()
+  await q.append(ports(f), notice('quiet', f.now, { wake: false }))
+  let idle = 0
+  await q.deliver(ports(f), RULES, async () => {
+    idle++
+  })
+  expect(f.submits).toEqual([])
+  expect(idle).toBe(1)
+  // A waking notice joins: the wake names both
+  await q.append(ports(f), notice('loud', f.now))
+  await q.deliver(ports(f), RULES)
+  expect(f.submits.length).toBe(1)
+  expect(f.submits[0]).toContain('text quiet')
+  expect(f.submits[0]).toContain('text loud')
+})

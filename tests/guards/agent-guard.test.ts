@@ -125,6 +125,7 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('session.messages', () => ({ value: [] }))
   on('classic.Stop', () => ({}))
   on('classic.SessionStart', () => ({}))
+  on('classic.UserPromptSubmit', () => ({}))
   on('tool.call', async ($: any, e: any) => {
     if (e.tool === 'TaskStop') {
       w.stopped.push(e.task_id)
@@ -187,8 +188,12 @@ test('a waiting agent over the handover size is asked to hand over; its tasks ar
   expect(w.sent.length).toBe(1)
   expect(w.sent[0]!.text).toContain('hand over now')
   expect(w.sent[0]!.text).toContain('update STATUS.md')
-  // Tether has the agent in hand: nothing is stopped yet, and the end of a turn is not blocked
+  // Tether has the agent in hand: nothing is stopped yet, and the guard does not block the end of a turn; the request
+  // itself is told once there (#27), so the coordinator gives the agent no new work
   expect(w.stopped).toEqual([])
+  const told = (await stopHook($)).block
+  expect(told).toContain('asked worker (a1, 280k context) to hand over and stop')
+  expect(told).not.toContain('CACHE GUARD')
   expect((await stopHook($)).block).toBeUndefined()
   await clock.advance(3 * MIN)
   expect(w.stopped).toEqual([])
@@ -549,7 +554,9 @@ test('with cacheGuard.sizeHandover off a big agent waits for the act-after time 
   expect(w.sent).toEqual([])
   await clock.advance(11 * MIN)
   expect(w.sent.length).toBe(1)
-  expect(w.toasts.some(t => t.includes('retire line'))).toBe(false)
+  // Tether never asked for the retire line; the coordinator was told instead, once (#27)
+  expect(w.toasts.some(t => t.includes('to hand over and stop; its context is past'))).toBe(false)
+  expect(w.submits.filter(s => s.includes('worker (a1) stopped with 466k context, past the 300k retire line (fleet.retireContextTokens), and has background work')).length).toBe(1)
 })
 
 test('a big agent the coordinator records kept-warm after the size handover request is not asked again at its next stop', { timeoutMs: 30_000 }, async ($, on) => {
@@ -599,5 +606,108 @@ test('a failed message is not resent every tick: the next try waits a few minute
   expect(w.sent.length).toBe(1)
   await clock.advance(3 * MIN)
   expect(w.sent.length).toBe(2)
-  expect(w.logs.filter(l => l.includes('handover request to worker (a1) failed')).length).toBe(1)
+  expect(w.logs.filter(l => l === 'agent guard: handover request to worker (a1) failed: gone').length).toBe(1)
+})
+
+// The retire line and how its alerts reach the coordinator (#27): a running agent past it is told once, a stopped one
+// is handed over or told, and a notice a wake cannot carry is told at the next turn boundary.
+const LINE = { fleet: { bigContextTokens: 1000, retireContextTokens: 500_000 } }
+const running = () => [{ id: 'a1', status: 'running', description: 'big task', type: 'general-purpose', name: 'worker' }]
+const RETIRE_TEXT = 'worker (a1) is running with 511k context, past the 500k retire line'
+
+test('a running agent past the retire line is told to the coordinator once, by a wake while the session is idle', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: running(), context: 511_000 })
+  const clock = await start($, on, LINE, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.submits.filter(s => s.includes(RETIRE_TEXT)).length).toBe(1)
+  expect(w.submits[0]).toContain('Ask it to hand over now')
+  // Tether does not message a running agent itself: asking it and stopping it is the coordinator's call
+  expect(w.sent).toEqual([])
+  await step($)
+  await clock.advance(10 * MIN)
+  expect(w.submits.filter(s => s.includes(RETIRE_TEXT)).length).toBe(1)
+})
+
+test('while the main loop runs turn after turn, the alert is told once as the Stop hook reason, and no wake repeats it', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: running(), context: 511_000 })
+  const clock = await start($, on, LINE, w)
+  // A main-loop turn (a task notification's) is running: a wake cannot go
+  await $.turn.start({ text: '<task-notification>', turnId: 'm1' } as any)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.submits).toEqual([])
+  const stop = await stopHook($)
+  expect(stop.block).toContain('Tether: notices that waited while this session was busy')
+  expect(stop.block).toContain(RETIRE_TEXT)
+  expect(w.logs).toContain('watch: 1 notice told at the end of a turn')
+  // Told: the next end of a turn is free, and the turn's end sends no wake for it
+  expect((await stopHook($)).block).toBeUndefined()
+  await $.turn.complete({ turnId: 'm1', answer: '' } as any)
+  await clock.advance(5 * MIN)
+  expect(w.submits).toEqual([])
+})
+
+test('a prompt that starts a turn carries the notices that waited as added context', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: running(), context: 511_000 })
+  const clock = await start($, on, LINE, w)
+  await $.turn.start({ text: 'work', turnId: 'm1' } as any)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  const r: any = await ($ as any).classic.UserPromptSubmit({ prompt: 'next', hook_event_name: 'UserPromptSubmit' })
+  expect(r.additionalContext?.join(' ')).toContain('Tether: notices that waited for this turn')
+  expect(r.additionalContext?.join(' ')).toContain(RETIRE_TEXT)
+  // Told once: the end of the turn has nothing left to tell
+  expect((await stopHook($)).block).toBeUndefined()
+})
+
+test('with watch off an alert is still queued and told at the next turn boundary', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: running(), context: 511_000 })
+  const clock = await start($, on, { ...LINE, watch: { enabled: false } }, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  // No wake without watch
+  expect(w.submits).toEqual([])
+  expect((await stopHook($)).block).toContain(RETIRE_TEXT)
+})
+
+test('a stopped agent past the retire line with nothing to wake it is told once, and not messaged', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: [{ id: 'a1', status: 'completed', description: 'done', type: 'general-purpose', name: 'worker' }], context: 520_000 })
+  const clock = await start($, on, LINE, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  const told = w.submits.filter(s => s.includes('worker (a1) stopped with 520k context, past the 500k retire line'))
+  expect(told.length).toBe(1)
+  expect(told[0]).toContain('Do not wake it with SendMessage')
+  expect(w.sent).toEqual([])
+  await clock.advance(10 * MIN)
+  expect(w.submits.filter(s => s.includes('past the 500k retire line')).length).toBe(1)
+})
+
+test('a stopped agent past the line with background work is asked by Tether, and the coordinator hears of it at its next turn end, without a wake', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 520_000 })
+  const clock = await start($, on, LINE, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  expect(w.sent[0]!.text).toContain('hand over now')
+  // No turn of its own for the request, and no retire-line alert beside it (Tether has it in hand)
+  expect(w.submits).toEqual([])
+  const stop = await stopHook($)
+  expect(stop.block).toContain('asked worker (a1, 520k context) to hand over and stop')
+  expect(stop.block).not.toContain('CACHE GUARD')
+  expect((await stopHook($)).block).toBeUndefined()
+})
+
+test('a retire handover that cannot be sent is told to the model once, though Tether keeps trying', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ transcript: started('bt1'), context: 520_000, delivery: { isDelivered: false, reason: 'gone' } })
+  const clock = await start($, on, LINE, w)
+  await step($)
+  await clock.advance(1 * MIN + 5 * SEC)
+  expect(w.sent.length).toBe(1)
+  const told = () => w.submits.filter(s => s.includes('handover request to worker (a1) failed: gone; it is past the retire line')).length
+  expect(told()).toBe(1)
+  await clock.advance(7 * MIN)
+  expect(w.sent.length).toBe(2)
+  expect(told()).toBe(1)
 })

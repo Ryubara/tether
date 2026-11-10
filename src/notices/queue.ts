@@ -134,7 +134,8 @@ export class Notices {
     }
     const held = this.held
     const pending = await this.pending(ports)
-    if (pending.length === 0) return whenEmpty ? whenEmpty(now, held) : undefined
+    // A notice that may not wake (told at the next turn boundary) is no reason to hold the idle wake back
+    if (!pending.some(p => p.wake)) return whenEmpty ? whenEmpty(now, held) : undefined
     const draft = this.busy ? '' : await ports.draft()
     const verdict = wakeVerdict(pending, { busy: this.busy, draft, now, lastWakeAt: this.lastWakeAt, gapSeconds: rules.gapSeconds, deferMinutes: rules.deferMinutes, held })
     if (verdict !== 'go') return
@@ -142,6 +143,25 @@ export class Notices {
     await ports.save([])
     await this.submit(ports, rules, now, wakeText(rules.preamble, pending), pending)
     await ports.changed()
+  }
+
+  /**
+   * Takes every waiting notice out of the store, to be told at a turn boundary (a Stop-hook reason, a prompt's added
+   * context) instead of by a wake: the way a notice reaches a session whose turns run back to back, or whose wake is
+   * held. Empty while a wake is being decided or submitted, so a notice is never told twice.
+   */
+  async take(ports: NoticePorts): Promise<Notice[]> {
+    if (this.delivering) return []
+    this.delivering = true
+    try {
+      const pending = await this.pending(ports)
+      if (pending.length === 0) return []
+      await ports.save([])
+      this.count = 0
+      return pending
+    } finally {
+      this.delivering = false
+    }
   }
 
   /**

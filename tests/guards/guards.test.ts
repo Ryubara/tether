@@ -4,7 +4,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { DEFAULTS } from '../../src/fleet/config'
 import { coldGuard } from '../../src/fleet/guard'
-import { actAfterMinutes, decisionProblem, handoverWaitOf, planActions, sameModel, stopReason as agentStop, undecided, wakeKeepsModel, type StoppedCandidate } from '../../src/guards/agents'
+import { actAfterMinutes, decisionProblem, handoverWaitOf, planActions, retireAlerts, sameModel, stopReason as agentStop, undecided, wakeKeepsModel, type StoppedCandidate } from '../../src/guards/agents'
 import { CACHE_GUARD_DEFAULTS, mergeCacheGuard } from '../../src/guards/config'
 import { fromGh, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason, toldProblems, unowned, unpushedProblem } from '../../src/guards/prs'
 import { EMPTY_STORE, NEW_CYCLE, ownerCovers, pruneOwners, readStore, recordAction, recordAlert, recordDecision, recordOwner, recordRerun } from '../../src/guards/store'
@@ -401,4 +401,34 @@ test('cacheGuard.sizeHandover is on by default and can be turned off', async () 
   expect(CACHE_GUARD_DEFAULTS.sizeHandover).toBe(true)
   expect(mergeCacheGuard({ sizeHandover: false }).sizeHandover).toBe(false)
   expect(mergeCacheGuard({ sizeHandover: 'no' }).sizeHandover).toBe(true)
+})
+
+test('retireAlerts tells a running agent past the retire line once, and a stopped one Tether does not hand over itself', async () => {
+  const line = 500_000
+  const keys = (agents: StoppedCandidate[], store = EMPTY_STORE, handsOver = true) => retireAlerts(agents, store, line, handsOver).map(p => `${p.kind}:${p.id}:${p.kind === 'alert' ? p.key : ''}`)
+  const running: StoppedCandidate = { id: 'r', status: 'running', label: 'worker', lastStepAt: NOW, contextTokens: 511_000 }
+  // The case seen on 2026-11-10: running at 511k, past a 500k line; nothing else told the coordinator
+  const [told] = retireAlerts([running], EMPTY_STORE, line, true)
+  expect(told).toEqual({ kind: 'alert', id: 'r', label: 'worker', key: 'retire-line', since: 0, text: expect.stringContaining('worker (r) is running with 511k context, past the 500k retire line') })
+  expect(told!.kind === 'alert' && told.text).toContain('Ask it to hand over now')
+  // Once per agent: recorded, it is not told again, whatever the time
+  expect(keys([running], recordAlert(EMPTY_STORE, 'r', 'retire-line', NOW))).toEqual([])
+  // Under the line, ended, decided, being handed over, or kept past the line by the coordinator: nothing
+  expect(keys([{ ...running, contextTokens: 499_000 }])).toEqual([])
+  expect(keys([{ ...running, status: 'failed' }])).toEqual([])
+  expect(keys([running], recordDecision(EMPTY_STORE, 'r', 'retired', '', 't', NOW))).toEqual([])
+  expect(keys([running], recordAction(EMPTY_STORE, 'r', { handoverAt: NOW }))).toEqual([])
+  expect(keys([running], recordAction(EMPTY_STORE, 'r', { retireKept: NOW }))).toEqual([])
+  // A kept-warm record is no decision: a running agent past the line is still told
+  expect(keys([running], recordDecision(EMPTY_STORE, 'r', 'kept-warm', '', 't', NOW))).toEqual(['alert:r:retire-line'])
+  // Stopped with nothing to wake it: told not to wake it
+  const idle: StoppedCandidate = { id: 's', status: 'completed', label: 'done', lastStepAt: NOW, contextTokens: 520_000, tasks: [] }
+  expect(retireAlerts([idle], EMPTY_STORE, line, true)[0]).toMatchObject({ text: expect.stringContaining('Do not wake it with SendMessage') })
+  // Stopped with background work: planActions hands it over when Tether acts; otherwise the coordinator is told
+  const bg: StoppedCandidate = { id: 'b', status: 'waiting', label: 'b', lastStepAt: NOW, contextTokens: 520_000, tasks: ['t1'] }
+  expect(keys([bg], EMPTY_STORE, true)).toEqual([])
+  expect(keys([bg], EMPTY_STORE, false)).toEqual(['alert:b:retire-line'])
+  // The alert record survives the store's round trip
+  expect(readStore(JSON.parse(JSON.stringify(recordAlert(EMPTY_STORE, 'r', 'retire-line', NOW)))).actions['r']?.alerts['retire-line']).toBe(NOW)
+  expect(readStore(JSON.parse(JSON.stringify(recordAlert(EMPTY_STORE, 'r', 'handover-failed', NOW)))).actions['r']?.alerts['handover-failed']).toBe(NOW)
 })
