@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.0-alpha.33
+
+- Fixed: a running subagent past `fleet.retireContextTokens` (the pane's `retire` flag) raised nothing the model saw:
+  the agent guard acted only on stopped agents, and the `agents` poller that also tells the size runs only when a
+  config declares one. The guard now tells the coordinator once per agent, with what to do (ask it to hand over, let
+  it stop, start a fresh agent), whether or not `cacheGuard.auto` is on. Seen 2026-11-10: an agent flagged at 511k
+  grew to 539k before the coordinator was asked by hand.
+- Fixed: a stopped agent past the retire line with no background work was told nothing (it can be woken by the
+  coordinator's own `SendMessage`, at its whole context); it is now told once not to wake it. With `auto` or
+  `sizeHandover` off, one with background work is told too.
+- Fixed: a notice could wait for good in a session whose turns run back to back (task notifications), since a wake
+  goes only while the session is idle and a refused one waits. What waits is now told at the next turn boundary: as
+  the Stop hook's reason when a main-loop turn ends, or as added context of the next prompt (`UserPromptSubmit`),
+  once, whichever comes first.
+- Fixed: with watch off the agent guard's alerts were dropped (a toast and a log line only); they are now queued and
+  told at the next turn boundary.
+- Fixed: a retire-line handover request that could not be sent was only logged; it is now told to the model once.
+- Changed: the agent guard's handover request is told to the coordinator at its next turn boundary, without a wake
+  of its own, so it gives the agent no new work meanwhile.
+- Changed: the status line shows `N to tell` while notices wait, also with no poller configured.
+- Added: housekeeping says once per load when `~/.claude/tether/` still holds the files of the Tether before the
+  plugin (`failed-*`, `cleared-*`, `meter-*`, `wellness-*`); nothing writes or reads them any more.
+
 ## 1.0.0-alpha.32
 
 - Changed: the queue of findings waiting to be told and the rules that start a turn for them (not during a turn, not

@@ -106,7 +106,9 @@ test('the agents poller wakes at the subagent max context option, not at 300k', 
   const clock = await start($, on, { pollers: [{ id: 'agents', kind: 'agents', title: 'Agents', everySeconds: 60 }] }, w)
   await bigStep($, 'a1')
   await clock.advance(2 * MIN)
-  expect(w.submits).toEqual(['watch found something new. Handle it or say why it can wait:\n\nAgents:\n- builder (a1) context 250k, past 200k'])
+  expect(w.submits.filter(t => t.includes('Agents:'))).toEqual(['watch found something new. Handle it or say why it can wait:\n\nAgents:\n- builder (a1) context 250k, past 200k'])
+  // The agent guard tells the same line by itself, with what to do (#27)
+  expect(w.submits.filter(t => t.includes('Agent guard:\n- builder (a1) is running with 250k context, past the 200k retire line')).length).toBe(1)
 })
 
 test('an agents poller with its own contextTokens ignores the subagent max context option', { timeoutMs: 30_000, options: { fleetRetireContextTokens: 200_000 } }, async ($, on) => {
@@ -115,7 +117,7 @@ test('an agents poller with its own contextTokens ignores the subagent max conte
   const clock = await start($, on, { pollers: [{ id: 'agents', kind: 'agents', title: 'Agents', everySeconds: 60, contextTokens: 400_000 }] }, w)
   await bigStep($, 'a1')
   await clock.advance(2 * MIN)
-  expect(w.submits).toEqual([])
+  expect(w.submits.filter(t => t.includes('Agents:'))).toEqual([])
 })
 
 const TRIAGE = { pollers: [{ id: 'triage', kind: 'issues', title: 'Issues to triage', labels: ['needs-triage'], everySeconds: 120 }] }

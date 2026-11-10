@@ -17,12 +17,12 @@ import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
 import { DEFAULTS as WATCH_DEFAULTS, parseConfig, type CommandPoller, type IssuesPoller, type Poller, type WatchConfig } from '../src/watch/config'
 import { Boxes as WatchBoxes, clockText, type BoxState, type LogLine, type WatchState as WatchStateData } from '../src/watch/boxes'
 import { agentFindings, atWork, fresh, idleWakeDue, issueFindings, liveBackground, readOutput, readPlainOutput, type AgentSeen, type Finding, type Seen, type Told } from '../src/watch/findings'
-import type { Notice } from '../src/notices/notice'
+import { AT_PROMPT, AT_STOP, wakeText, type Notice } from '../src/notices/notice'
 import { Notices, type NoticePorts, type WakeRules } from '../src/notices/queue'
 import { CHECKPOINT_DEFAULTS, mergeCheckpoint, withHandoffEnv, type CheckpointConfig } from '../src/checkpoint/config'
 import { handoffProblems, injectedHandoff } from '../src/checkpoint/handoff'
 import { askText, backedOff, continueText, describeCycle, forceCheckpoint, initialCycle, newInformation, repairText, step as cycleStep, type Action, type CycleState, type Observed } from '../src/checkpoint/cycle'
-import { alerted, decisionProblem, planActions, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
+import { alerted, decisionProblem, planActions, retireAlerts, stopReason as agentStopReason, undecided, type AgentRules, type Plan, type Undecided } from '../src/guards/agents'
 import { CACHE_GUARD_DEFAULTS, mergeCacheGuard, type CacheGuardConfig } from '../src/guards/config'
 import { ACTIVE_RERUN, CAUSES, GH_FIELDS, fromGh, plainProblem, fromHealth, problemKey, problemLine, rerunInfo, rerunsFromHealth, stopReason as prStopReason, toldProblems, unowned, unpushedProblem, type Problem } from '../src/guards/prs'
 import { NEW_CYCLE, pruneOwners, readStore, recordAction, recordAlert, recordDecision, recordOwner, recordRerun, type GuardStore } from '../src/guards/store'
@@ -30,7 +30,7 @@ import { layered } from '../src/options/options'
 import { DEFAULT_CONFIG_FILE, HALT_TEXT, OPEN_POLICY, commandRefusal, configSource, judge, type Policy, type Refusal, type Source } from '../src/options/policy'
 import { AGENT_STATUSES, hashKey, plainCode, plainError, plainId, plainLimitKind } from '../src/options/plain'
 import { mergeConversations, mergeHousekeeping, mergeStop, stopBlocks, CONVERSATIONS_DEFAULTS, HOUSEKEEPING_DEFAULTS, STOP_DEFAULTS, type ConversationsConfig, type HousekeepingConfig, type StopConfig, type StopState } from '../src/housekeeping/config'
-import { excludeLines, handoffTemplate, isHandoffPath, withExcludes } from '../src/housekeeping/files'
+import { excludeLines, handoffTemplate, isHandoffPath, legacyStateLine, withExcludes } from '../src/housekeeping/files'
 import { CHECKPOINT, FLEET, GUARDS, WATCH, registration } from '../src/commands/commands'
 import { logName, renderConversation, type LogMessage } from '../src/conversation/render'
 
@@ -880,7 +880,8 @@ function remaining(p: Poller, now: number): string {
 /** The status line: each poller's countdown, pending count, failing pollers, config problems. */
 async function status($: any): Promise<void> {
   if (wcfg.pollers.length === 0 && problems.length === 0) {
-    watchStatus = undefined
+    // No poller, but the agent guard's notices still wait in the queue: the count shows
+    watchStatus = notices.count ? `${notices.count} to tell` : undefined
     return showStatus($)
   }
   const now = await $.clock.now()
@@ -1470,16 +1471,22 @@ function refreshMarks(store: GuardStore): void {
   }
 }
 
-/** Tells the coordinator: a toast, a log line, a line for /tether-guards; an alert also wakes the model, as a notice in the queue (src/notices). */
-async function reportGuard($: any, text: string, now: number, alert?: { id: string }): Promise<void> {
+/**
+ * Tells the coordinator: a toast, a log line, a line for /tether-guards. An alert also goes to the model as a notice in
+ * the queue (src/notices), which a wake delivers when watch is on and the session idle, and the next turn boundary
+ * otherwise (the Stop hook's reason, a prompt's added context): queued with watch off too, so it is never dropped.
+ * `wake: false` tells it at the next boundary or with the next wake, without starting a turn of its own.
+ */
+async function reportGuard($: any, text: string, now: number, alert?: { id: string; wake?: boolean }): Promise<void> {
   guardNotes.push(`${clockOf(now)} ${text}`)
   if (guardNotes.length > 30) guardNotes.shift()
   $.ui.toast(`agent guard: ${text}`)
   $.ui.log(`agent guard: ${text}`)
-  if (!alert || !wcfg.enabled) return
-  const add: Notice = { key: `${alert.id}|guard|${now}`, text, poller: 'agent-guard', title: 'Agent guard', wake: true, at: now }
+  if (!alert) return
+  const add: Notice = { key: `${alert.id}|guard|${now}`, text, poller: 'agent-guard', title: 'Agent guard', wake: alert.wake !== false, at: now }
   await notices.append(noticePorts($), add)
-  void deliver($)
+  await status($)
+  if (wcfg.enabled) void deliver($)
 }
 
 /** Messages a subagent through the plugin API; the reason when it was not delivered. */
@@ -1517,10 +1524,17 @@ function failedOnce($: any, id: string, text: string): void {
   $.ui.log(`agent guard: ${text}`)
 }
 
-/** A message to an agent failed: said once per reason, and the next message waits (no resend every tick). */
-async function sendFailed($: any, id: string, now: number, text: string): Promise<void> {
+/**
+ * A message to an agent failed: said once per reason, and the next message waits (no resend every tick). A retire
+ * handover that could not be sent (`tell`) is also told to the model, once per agent: such an agent is not idle long
+ * enough to be among the undecided ones the Stop hook names, so nothing else would tell it.
+ */
+async function sendFailed($: any, id: string, now: number, text: string, tell = false): Promise<void> {
   failedOnce($, id, text)
-  await updateGuardStore($, s => recordAction(s, id, { sendFailedAt: now }))
+  const store = await updateGuardStore($, s => recordAction(s, id, { sendFailedAt: now }))
+  if (!tell || alerted(store.actions[id], 'handover-failed', 0)) return
+  await updateGuardStore($, s => recordAlert(s, id, 'handover-failed', now))
+  await reportGuard($, `${text}; it is past the retire line and not asked yet (Tether tries again every few minutes). Ask it to hand over yourself (SendMessage), or record it kept-warm to keep it`, now, { id })
 }
 
 /** The engine's current word on one agent (a fresh $.agent.list), or undefined when it cannot be read. */
@@ -1542,7 +1556,7 @@ async function runPlan($: any, plan: Plan, now: number): Promise<void> {
     await reportGuard($, `kept ${plan.label} (${plan.id}) warm (ping ${plan.count}); its background work goes on`, now)
   } else if (plan.kind === 'handover') {
     const sent = await sendToAgent($, plan.id, gCfg.handoverText)
-    if (!sent.ok) return sendFailed($, plan.id, now, plain() ? `handover request to ${plan.id} failed` : `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`)
+    if (!sent.ok) return sendFailed($, plan.id, now, plain() ? `handover request to ${plan.id} failed` : `handover request to ${plan.label} (${plan.id}) failed: ${sent.reason}`, plan.why === 'retire')
     await updateGuardStore($, s => recordAction(s, plan.id, { ...NEW_CYCLE, warms: 0, handoverAt: now, sendFailedAt: undefined }))
     const runsOn = plain() ? 'another model' : plan.model ?? 'an unknown model'
     const why =
@@ -1552,7 +1566,8 @@ async function runPlan($: any, plan: Plan, now: number): Promise<void> {
           ? `; its context is past the ${tokens(cfg.retireContextTokens)} retire line (fleet.retireContextTokens)` +
             (plan.otherModel ? `; it runs on ${runsOn}, so this message wakes it on the session's model and writes one new cache` : '')
           : ''
-    await reportGuard($, `asked ${plan.label} (${plan.id}, ${tokens(plan.contextTokens)} context) to hand over and stop${why}; its background tasks are stopped once it has`, now)
+    // The coordinator hears of the request at its next turn boundary (no wake of its own), so it gives the agent no new work
+    await reportGuard($, `asked ${plan.label} (${plan.id}, ${tokens(plan.contextTokens)} context) to hand over and stop${why}; its background tasks are stopped once it has`, now, { id: plan.id, wake: false })
   } else if (plan.kind === 'collect') {
     // The plan is a few seconds old: look again before stopping anything, as a finishing task may have woken the agent
     const live = await agentNow($, plan.id)
@@ -1607,6 +1622,7 @@ async function guardTick($: any): Promise<void> {
   try {
     const now = await $.clock.now()
     const seen = await agentsSeen($, now)
+    const safely = (plan: Plan) => runPlan($, plan, now).catch(err => failedOnce($, plan.id, plain() ? `${plan.kind} of ${plan.id} failed` : `${plan.kind} of ${plan.label} (${plan.id}) failed: ${err}`))
     if (gCfg.auto) {
       const store = await guardStore($)
       let sessionModel: string | undefined
@@ -1624,9 +1640,14 @@ async function guardTick($: any): Promise<void> {
         ...(gCfg.sizeHandover ? { retireTokens: cfg.retireContextTokens } : {}),
       }
       const plans = planActions(seen, store, agentRules(), auto, now)
-      const safely = (plan: Plan) => runPlan($, plan, now).catch(err => failedOnce($, plan.id, plain() ? `${plan.kind} of ${plan.id} failed` : `${plan.kind} of ${plan.label} (${plan.id}) failed: ${err}`))
       await Promise.all(plans.filter(x => x.kind === 'warm' || x.kind === 'handover').map(safely))
       for (const plan of plans.filter(x => x.kind !== 'warm' && x.kind !== 'handover')) await safely(plan)
+    }
+    if (!halted) {
+      // Past the retire line, what Tether does not hand over itself (a running agent, a stopped one with nothing to
+      // wake it) is told to the coordinator once, whether or not the guard acts by itself
+      const store = await guardStore($)
+      for (const plan of retireAlerts(seen, store, cfg.retireContextTokens, gCfg.auto && gCfg.sizeHandover)) await safely(plan)
     }
     const store = await guardStore($)
     refreshMarks(store)
@@ -1899,10 +1920,26 @@ async function housekeepingStart($: any): Promise<void> {
       $.ui.toast(`${cpCfg.handoffFile} fails its check`)
       $.ui.log(`housekeeping: ${cpCfg.handoffFile} fails its check: ${problems.join('; ')}`)
     }
+    await legacyStateCheck($)
   } catch (err) {
     $.ui.log(plain() ? 'housekeeping: failed' : `housekeeping: ${err}`)
   }
 }
+
+/** Says once per load when the config folder still holds the files of the Tether before the plugin (src/housekeeping/files.ts). */
+async function legacyStateCheck($: any): Promise<void> {
+  if (legacyTold) return
+  legacyTold = true
+  try {
+    const dir = `${(await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${(await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? ''}/.claude`}/tether`
+    if (!(await $.fs.exists(dir))) return
+    const line = legacyStateLine(plain() ? '~/.claude/tether' : dir, ((await $.fs.list(dir)) as Array<{ name: string }>).map(e => e.name))
+    if (line) $.ui.log(line)
+  } catch {
+    // An unreadable folder is not worth a line
+  }
+}
+let legacyTold = false
 
 /** Writes this session's conversation log (whole each time); unless forced, at most every `minSeconds`, with a trailing write. */
 async function writeLog($: any, force = false): Promise<void> {
@@ -1979,8 +2016,17 @@ export const register: Register = (on, opts) => {
     const r: any = await next(e)
     // The main loop's own background work in flight as its turn ends: the idle wake waits for it
     mainBackground = liveBackground((e as any).background_tasks)
-    // Without the guard tools nothing can clear the reason, so it never blocks
-    if (!stopCfg.enabled || !gCfg.registerTools) return r
+    if (!stopCfg.enabled || halted) return r
+    // What waits in the notice queue is told here, as the reason: a session whose turns run back to back (task
+    // notifications) has no idle moment for a wake. Each notice is told once, so this never loops
+    const told = await notices.take(noticePorts($))
+    const toldText = told.length > 0 ? wakeText(AT_STOP, told) : ''
+    if (told.length > 0) {
+      $.ui.log(`watch: ${told.length} notice${told.length === 1 ? '' : 's'} told at the end of a turn`)
+      await status($)
+    }
+    // Without the guard tools nothing can clear the guards' reason, so only notices block
+    if (!gCfg.registerTools) return toldText ? { ...(r ?? {}), block: toldText } : r
     const now = await $.clock.now()
     const store = await guardStore($)
     // Look again, so a ping or a decision since the last tick counts
@@ -1989,14 +2035,17 @@ export const register: Register = (on, opts) => {
       unowned(lastProblems, store, now).length > 0 ? prStopReason(unowned(lastProblems, store, now)) : '',
       open.length > 0 ? agentStopReason(open) : '',
     ].filter(Boolean)
-    if (reasons.length === 0) {
-      stopState = undefined
-      return r
+    let guard = ''
+    if (reasons.length === 0) stopState = undefined
+    else {
+      // The block limit counts the guards' reason alone: notices are new each time
+      const reason = reasons.join('\n\n')
+      const verdict = stopBlocks(stopState, reason, stopCfg.maxBlocks, now)
+      stopState = verdict.next
+      if (verdict.block) guard = reason
     }
-    const reason = reasons.join('\n\n')
-    const verdict = stopBlocks(stopState, reason, stopCfg.maxBlocks, now)
-    stopState = verdict.next
-    return verdict.block ? { ...(r ?? {}), block: reason } : r
+    const block = [guard, toldText].filter(Boolean).join('\n\n')
+    return block ? { ...(r ?? {}), block } : r
   }).catch(($, e, next) => next(e))
 
   // The handoff follows its template: a Write that breaks it is refused; an Edit that leaves it broken is told.
@@ -2044,11 +2093,23 @@ export const register: Register = (on, opts) => {
     const text = await takeInjection($)
     return next(text === undefined ? e : ({ ...e, context: [...((e as any).context ?? []), text] } as any))
   }).catch(($, e, next) => next(e))
+  // Notices still waiting when a prompt starts a turn (the person's, or one the engine queued) go with it as context.
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const r: any = await next(e)
-    if (!injectNext) return r
-    const text = await takeInjection($)
-    return text === undefined ? r : { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), text] }
+    const add: string[] = []
+    if (injectNext) {
+      const text = await takeInjection($)
+      if (text !== undefined) add.push(text)
+    }
+    if (!halted) {
+      const told = await notices.take(noticePorts($))
+      if (told.length > 0) {
+        add.push(wakeText(AT_PROMPT, told))
+        $.ui.log(`watch: ${told.length} notice${told.length === 1 ? '' : 's'} told with a prompt`)
+        await status($)
+      }
+    }
+    return add.length === 0 ? r : { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), ...add] }
   }).catch(($, e, next) => next(e))
   on('turn.complete', async ($, e, next) => {
     const r = await fleetComplete($, e, (e2: any) => watchComplete($, e2, next))

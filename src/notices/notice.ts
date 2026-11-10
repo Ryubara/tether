@@ -55,3 +55,8 @@ export function requeue(back: Notice[], now: Notice[]): Notice[] {
   }
   return out
 }
+
+/** The first line of notices told at the end of a turn (a Stop-hook reason). */
+export const AT_STOP = 'Tether: notices that waited while this session was busy (a wake could not start a turn for them). Handle each, or say why it can wait:'
+/** The first line of notices told as context of a prompt that starts a turn. */
+export const AT_PROMPT = 'Tether: notices that waited for this turn (a wake could not start one for them). Handle each, or say why it can wait:'

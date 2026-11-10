@@ -7,7 +7,9 @@
 // tasks are stopped and, once it is quiet, it is recorded as retired. A message wakes an agent on the parent
 // session's model unless the Agent call pinned one (measured, see `metaModel`), and the cache is per model: an agent on
 // another model is never pinged (that would write a new cache and switch its model) but handed over. When Tether cannot act (off, or the engine refused), the agent
-// stays a finding, the Stop hook blocks, and the model decides (`undecided`, `decisionProblem`). A decided
+// stays a finding, the Stop hook blocks, and the model decides (`undecided`, `decisionProblem`). An agent past the
+// retire line that Tether does not hand over itself (running, or stopped with nothing to wake it) is told to the
+// coordinator once (`retireAlerts`). A decided
 // (retired or done) agent is never woken: the cold guard (src/fleet/guard.ts) refuses any message to it.
 
 import type { AgentAction, AlertKind, GuardStore } from './store'
@@ -237,6 +239,48 @@ export type Plan =
   | { kind: 'retire'; id: string; label: string; stopped: number }
   | { kind: 'alert'; id: string; label: string; key: AlertKind; /** The alert is told once until the agent has done something after this time. */ since: number; text: string }
 
+/** Statuses of an agent that is over for good: nothing is told about it. */
+const ENDED = new Set(['failed', 'killed'])
+
+/** A token count as `511k`. */
+function k(n: number): string {
+  return `${Math.round(n / 1000)}k`
+}
+
+/**
+ * The coordinator's alerts for agents past the retire line (`fleet.retireContextTokens`, the line the pane flags as
+ * `retire`) that Tether does not hand over by itself, each told once per agent:
+ *
+ * - a running agent: a message from Tether would only queue behind its work, and stopping it is the coordinator's
+ *   call, so the coordinator is told to ask it for a handover;
+ * - a stopped agent with no background work: nothing wakes it, but the coordinator's next SendMessage would, at its
+ *   whole context, so it is told to start a fresh agent instead;
+ * - a stopped agent with background work, when Tether does not ask it itself (`handsOver` false: auto or
+ *   sizeHandover off).
+ *
+ * An agent decided retired or done, one Tether is handing over, and one the coordinator kept past the line
+ * (`retireKept`) is left out. `handsOver` true: a stopped agent with background work is planActions' to hand over.
+ */
+export function retireAlerts(agents: StoppedCandidate[], store: GuardStore, retireTokens: number, handsOver: boolean): Plan[] {
+  const out: Plan[] = []
+  for (const a of agents) {
+    const context = a.contextTokens ?? 0
+    if (context < retireTokens || ENDED.has(a.status) || final(store, a.id)) continue
+    const act = store.actions[a.id]
+    if (act?.handoverAt !== undefined || act?.retireKept !== undefined || alerted(act, 'retire-line', 0)) continue
+    const stopped = STOPPED.has(a.status)
+    if (stopped && hasBackground(a) && handsOver) continue
+    const past = `${k(context)} context, past the ${k(retireTokens)} retire line (fleet.retireContextTokens)`
+    const text = !stopped
+      ? `${a.label} (${a.id}) is running with ${past}. Ask it to hand over now (SendMessage: commit, write its status and stop), let it stop, then start a fresh agent from its notes and record it retired with agent_decision.`
+      : hasBackground(a)
+        ? `${a.label} (${a.id}) stopped with ${past}, and has background work that wakes it when it reports. Ask it to hand over, TaskStop its background tasks, then record it retired with agent_decision.`
+        : `${a.label} (${a.id}) stopped with ${past}. Do not wake it with SendMessage (that re-reads its whole context): start a fresh agent from its notes, and record it done or retired with agent_decision.`
+    out.push({ kind: 'alert', id: a.id, label: a.label, key: 'retire-line', since: 0, text })
+  }
+  return out
+}
+
 /** A real piece of work between two pings: the context grew by at least this much (a ping's answer adds a few hundred tokens). */
 const WORK_TOKENS = 10_000
 /** After the leftover tasks were stopped, how long the agent gets to show it is quiet before it is retired. */
@@ -254,7 +298,8 @@ const SETTLE_MS = 45_000
  *   `keepWarmMax` pings were sent with no real work between).
  * - A stopped agent with background work whose context has passed `retireTokens` is handed over at once, at its
  *   first stop seen, while its cache is still warm: waiting for the act-after time would let it grow on.
- * - A stopped agent with no background work cannot wake itself, so it is left to the model's decision.
+ * - A stopped agent with no background work cannot wake itself, so it is left to the model's decision (past the
+ *   retire line it is told once, by `retireAlerts`, as is a running one).
  * The plans are ordered so the messages (cache-critical) come before the task stops.
  */
 export function planActions(agents: StoppedCandidate[], store: GuardStore, rules: AgentRules, auto: AutoRules, now: number): Plan[] {

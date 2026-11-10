@@ -44,6 +44,12 @@ run inside Claude Code (version 2.1.287 or later). See the
   background tasks (shells, monitors) in flight when its last turn ended. The minutes count from the last turn's end,
   the last wake and the last time a subagent was seen at work. `watch.idleWakeText` is the prompt (`{minutes}` stands
   for the minutes).
+  **At a turn boundary.** A session whose turns run back to back (a coordinator woken by one task notification after
+  another) has no idle moment for a wake, and a refused wake waits. So what still waits in the queue is told at the
+  next turn boundary instead: as the Stop hook's reason when a main-loop turn ends (the model carries on with it in
+  the same turn; with `stop.enabled`), or as added context of the next prompt that starts a turn (the
+  `UserPromptSubmit` hook). Each notice is told once, by whichever comes first, so the block never repeats. The status
+  line shows `N to tell` while notices wait, with or without a poller.
 - **Commands.** `/tether-fleet` (the pane; `text` prints the table), `/tether-watch` (report and pane; `run`, `forget`, `reload`, `pane`),
   `/tether-guards` (text) and `/tether-checkpoint` (a checkpoint now). Pane commands say `(PANE)` in the command list. The names are prefixed with `tether-`
   because the plugin API takes only letters, digits, `_` and `-` in a command name (no `:`).
@@ -144,8 +150,16 @@ run inside Claude Code (version 2.1.287 or later). See the
     do not hold it back; a retired or done record does, and an expired cache is never messaged. If the coordinator
     records the agent `kept-warm` after the request (or once it is past the line), that is its call: Tether does not
     ask again at later stops, though the usual near-expiry rule still applies. An agent on another model is asked
-    too, and the toast says the message writes one new cache on the session's model. An agent past the line that
-    stopped with no background work has ended its turn and reported, so it is left to the model, as before.
+    too, and the toast says the message writes one new cache on the session's model. The request is also told to the
+    coordinator at its next turn boundary (no wake of its own), so it gives the agent no new work meanwhile; a
+    request that cannot be sent is told to it once (Tether still tries again every 5 minutes).
+  - **Told past the max context.** What Tether does not hand over itself is told to the coordinator once per agent,
+    as a notice (`retire-line`), whether or not `cacheGuard.auto` is on: a **running** agent past
+    `fleet.retireContextTokens` (Tether does not message a running agent; the coordinator asks it to hand over, lets
+    it stop and starts a fresh agent), a **stopped one with no background work** (nothing wakes it, but a
+    `SendMessage` would, at its whole context: start a fresh agent instead and record it `done` or `retired`), and a
+    stopped one with background work when `auto` or `sizeHandover` is off. These are the agents the pane flags
+    `retire`. A retired or done record, a handover under way, or the coordinator's `kept-warm` past the line ends it.
   - **Tasks the agent ends itself.** A background task ends at its `<task-notification>`, or when the agent stops it
     with its own `TaskStop` (the answer "Successfully stopped task: <id>" is the only trace; no notification
     follows). Only TaskStop's own result counts, read from its structured record or, in an appended row, from a row
@@ -159,7 +173,9 @@ run inside Claude Code (version 2.1.287 or later). See the
   - **No ping on an expired cache** (it would be the re-write), and no action for a stopped agent without
     background work (it cannot wake itself): those are left to the model, below.
   Every action is a toast, a log line (`agent guard: ...`), a line in `/tether-guards` and a `guard ...` flag in the
-  fleet pane. `cacheGuard.auto` off turns the actions off and leaves only the following.
+  fleet pane. An alert is also a notice for the model, queued even with watch off: a wake tells it while the session
+  is idle (watch on), and the next turn boundary otherwise (see Watch). `cacheGuard.auto` off turns the actions off
+  and leaves the retire-line alerts and the following.
 
   **The fallback, which also covers a failed send.** An agent the guard could not deal with (auto off, the message
   not delivered, a late handover) stays a finding and the Stop hook blocks until the model deals with it by one of
@@ -191,11 +207,16 @@ run inside Claude Code (version 2.1.287 or later). See the
   such an agent is not retired. Tether stops tasks, never the agent
   itself (a `TaskStop` of an agent's id is possible, but it would be abrupt and lose its handover).
 - **Stop hook.** The end of a turn is blocked while a PR problem or an agent the guard has not dealt with is open,
-  at most `stop.maxBlocks` times in a row for the same reason. `/tether-guards` prints what is open and what the
-  agent guard did.
+  at most `stop.maxBlocks` times in a row for the same reason, and once for each set of notices still waiting (they
+  are told in the reason and leave the queue; the limit counts the guards' reason alone). `/tether-guards` prints
+  what is open and what the agent guard did.
 - **Housekeeping.** Tether's folder, the handoff and a project-relative config go into `.git/info/exclude` (no
   tracked file is touched); a missing `HANDOFF.md` is made from the template; a Write of it that breaks the
-  template is refused.
+  template is refused. Tether keeps its own state in Claude Code's plugin store, never in `~/.claude/tether/`: the
+  `failed-<project>-<session>.json`, `cleared-*`, `meter-*` and `wellness-*` files there were left by the Tether
+  before the plugin (hook scripts, up to 2026-10-12). A `failed-*` file said that a checkpoint's `/clear` did not
+  follow within 600 s, so the continue prompt was never typed; none has been written since, and nothing reads them.
+  Housekeeping says so once per load in the log, and the folder can be deleted (the plugin API cannot delete files).
 - **Conversation logs.** Each session is rendered to `.tether/conversations/` as Markdown, after every turn,
   before a checkpoint clear and when the session ends. Logs are for you to look back at; they are never loaded
   into a session.
