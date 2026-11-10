@@ -126,6 +126,8 @@ async function start($: any, on: any, config: unknown, w: World) {
   on('classic.Stop', () => ({}))
   on('classic.SessionStart', () => ({}))
   on('classic.UserPromptSubmit', () => ({}))
+  on('classic.SubagentStop', () => ({}))
+  on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
   on('tool.call', async ($: any, e: any) => {
     if (e.tool === 'TaskStop') {
       w.stopped.push(e.task_id)
@@ -316,6 +318,64 @@ test('agent_decision refuses retired and done for an agent with live background 
   // Once it has stopped with nothing live it may be retired
   w.agents = [{ id: 'a1', status: 'completed', description: 'build wait', type: 'general-purpose', name: 'worker' }]
   expect(JSON.stringify(await decide($, 'retired'))).toContain('a1 recorded as retired')
+})
+
+/** The SubagentStop the engine raises at the end of an agent's turn, with the background work it still has in flight. */
+const subagentStop = async ($: any, tasks: string[], id = 'a1'): Promise<any> =>
+  ($ as any).classic.SubagentStop({ stop_hook_active: false, agent_id: id, agent_type: 'general-purpose', background_tasks: tasks.map(t => ({ id: t, type: 'shell', status: 'running', description: 'build' })) })
+/** A /clear: the conversation ends, and the harness kills the running commands of the agents that are not at work. */
+const clear = async ($: any): Promise<any> => ($ as any).session.end({ reason: 'clear', sessionId: 'abcdef12-0000', resume: { id: 'abcdef12-0000' } })
+
+test('agent_decision records done for a task left over from a cleared session, which the harness no longer has', { timeoutMs: 30_000 }, async ($, on) => {
+  // Seen 2026-11-10 (tether #30): the agent's shell bfsxcqsxl ran when its session was cleared; no notification reached
+  // its transcript, TaskStop answered "No task found", and agent_decision kept refusing over it
+  const w = world({ agents: [{ id: 'a1', status: 'completed', description: 'issue 923', type: 'general-purpose', name: 'worker' }], transcript: started('bfsxcqsxl') })
+  const clock = await start($, on, { ...CFG, cacheGuard: { auto: false } }, w)
+  await step($)
+  await subagentStop($, ['bfsxcqsxl'])
+  await clock.advance(5 * MIN)
+  // Before the clear the harness still had it: refused
+  expect((await decide($, 'done') as any).deny).toContain('bfsxcqsxl')
+  await clear($)
+  await clock.advance(1 * MIN)
+  expect(JSON.stringify(await decide($, 'done'))).toContain('a1 recorded as done')
+})
+
+test('a task started after the clear still blocks agent_decision, and the agent\'s last SubagentStop decides what is live', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: [{ id: 'a1', status: 'completed', description: 'issue 923', type: 'general-purpose', name: 'worker' }], transcript: started('old1') })
+  const clock = await start($, on, { ...CFG, cacheGuard: { auto: false } }, w)
+  await step($)
+  await clock.advance(1 * MIN)
+  await clear($)
+  // Woken after the clear, it starts a new build and stops with it in flight: that one is the harness's, so refused
+  await clock.advance(1 * MIN)
+  w.transcript = [started('old1'), started('new1')].join('\n')
+  w.mtime = 2
+  await step($)
+  await subagentStop($, ['new1'])
+  await clock.advance(1 * MIN)
+  const refused: any = await decide($, 'retired')
+  expect(refused.deny).toContain('new1')
+  expect(refused.deny).not.toContain('old1')
+  // Its next stop shows nothing in flight (the build's end never reached the transcript): nothing blocks
+  await step($)
+  await subagentStop($, [])
+  await clock.advance(1 * MIN)
+  expect(JSON.stringify(await decide($, 'retired'))).toContain('a1 recorded as retired')
+})
+
+test('a SubagentStop older than the agent\'s last request does not end its tasks', { timeoutMs: 30_000 }, async ($, on) => {
+  const w = world({ agents: [{ id: 'a1', status: 'completed', description: 'issue 923', type: 'general-purpose', name: 'worker' }], transcript: '' })
+  const clock = await start($, on, { ...CFG, cacheGuard: { auto: false } }, w)
+  await step($)
+  await subagentStop($, [])
+  // A later turn started a build; its own stop has not been seen yet, so the empty list above says nothing about it
+  await clock.advance(1 * MIN)
+  w.transcript = started('bt9')
+  w.mtime = 2
+  await step($)
+  await clock.advance(1 * MIN)
+  expect((await decide($, 'done') as any).deny).toContain('bt9')
 })
 
 test('kept-warm quiets the guard for one window from the later of the ping and the last activity, and never refuses a message', { timeoutMs: 30_000 }, async ($, on) => {
