@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.0-alpha.34
+
+- Fixed: a subagent's size was read from the transcript files found the first time Tether looked and never listed
+  again, so the newer stretch an agent writes in a new session folder after a `/clear` or a resume was never seen.
+  The current session's folder is now looked at on every tick, the others listed again every 30 minutes, and the
+  newest file by its mtime now is the one read.
+- Fixed: an agent whose requests Tether had seen once kept that size for good when its requests stopped reaching the
+  module: its transcript was no longer read, and the agents poller and the guard preferred watch's last step over a
+  newer figure. A live agent's newest transcript is read again once it changed after the last request Tether saw,
+  and the newer of the two figures wins.
+- Fixed: a transcript over 4 MB, which `$.fs.read` rejects and which every agent near the retire line has, left an
+  agent with no size after a reload or a restart, so a stopped agent past the line was told nothing. Tether now
+  keeps each agent's last size in its plugin store (`guards:sizes:<storeName>`, two days) and uses it until a newer
+  request or a readable newer transcript replaces it.
+- Added: Tether logs `version <X> loaded from <folder>` at each start and after each `/clear`, and `/tether-guards`
+  names it. A `/clear` keeps the loaded module, so an installed update runs only after a restart. Seen 2026-11-10
+  (#29): alpha.33 was installed while the session ran on, cleared twice, so alpha.32 (with no alert for a running
+  agent) stayed loaded and an agent grew from 501k to 599k with no notice.
+
 ## 1.0.0-alpha.33
 
 - Fixed: a running subagent past `fleet.retireContextTokens` (the pane's `retire` flag) raised nothing the model saw:
