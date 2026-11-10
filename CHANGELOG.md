@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0-alpha.34
+
+- Fixed: `agent_decision` refused `retired` or `done` for good over a background task the harness no longer had
+  ("still has 1 live background task"; TaskStop: "No task found"). Tether learned that a task ended only from its
+  notification or a TaskStop answer, and a `/clear` kills the running commands of the agents not at work without
+  either. Tether now checks its record against the harness: the `background_tasks` of the agent's last
+  `SubagentStop`, and the clear itself, each counted only when not older than the agent's last request. A task
+  started after them still counts. Seen twice on 2026-11-10, for three finished agents.
+
 ## 1.0.0-alpha.33
 
 - Fixed: a running subagent past `fleet.retireContextTokens` (the pane's `retire` flag) raised nothing the model saw:
