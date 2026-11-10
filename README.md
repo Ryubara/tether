@@ -165,6 +165,13 @@ run inside Claude Code (version 2.1.287 or later). See the
     follows). Only TaskStop's own result counts, read from its structured record or, in an appended row, from a row
     whose origin is the TaskStop tool, and its id must match whole: the same JSON printed by Bash ends nothing. A command moved to the background by its timeout, or by the user, starts a task like
     `run_in_background` does.
+  - **Tasks the harness dropped.** Tether's record is checked against what the harness itself says: an agent's
+    `SubagentStop` lists the background work it has in flight (`background_tasks`), and a `/clear` kills the running
+    commands of the agents not at work with no notification in their transcripts. A tracked task missing from the
+    agent's last `SubagentStop`, or one an agent stopped before a clear still held, is not live, so it no longer keeps
+    the agent at work or makes `agent_decision` refuse it (TaskStop answered "No task found" for such a task). That
+    word counts only when it is not older than the agent's last request: a later turn may have started tasks it does
+    not know. It is kept in the store (`guards:harness:<storeName>`) for two days, so a reload still knows it.
   - **The guard trusts `fleet.cacheTtlMinutes`** (default 60, the one-hour cache the sessions use). It acts at that
     value less the lead. If the real cache lifetime is shorter (the 5-minute default cache, when the one-hour cache
     is not enabled for subagents), the cache dies long before the guard acts and nothing it does helps: set
@@ -195,7 +202,8 @@ run inside Claude Code (version 2.1.287 or later). See the
   **What the plugin API allows** (Claude Code 2.1.296): `$.session.send({ to: { agentId }, text })` messages a stopped
   or waiting subagent (a finished one is resumed from its transcript) and `$.tool.call({ tool: 'TaskStop', task_id })`
   stops a task, through the permission check, so a project that has not allowed TaskStop may see a prompt. There is no
-  call that lists an agent's background tasks. `$.agent.list()` says `waiting` for an agent held on background work;
+  call that lists an agent's background tasks; the `classic.SubagentStop` input's `background_tasks` lists them at each
+  of its stops (measured on 2.1.322: the agent's own shells; the main loop's `Stop` lists only the main loop's). `$.agent.list()` says `waiting` for an agent held on background work;
   the task ids come from the rows appended to its conversation (`session.append`: "running in background with ID",
   "moved to the background (ID: ...)" or "manually backgrounded by user with ID", and the `<task-notification>` or
   the agent's own `TaskStop` answer that ends a task) and, for a transcript under 4 MB (the most `$.fs.read` returns),

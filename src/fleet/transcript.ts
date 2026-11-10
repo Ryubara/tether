@@ -193,6 +193,30 @@ export function noteAppendedRow(row: { message?: { type?: unknown; name?: unknow
   if ((m.type === 'attachment' && m.name === 'queued_command') || row.origin?.kind === 'task-notification') endedIn(contentText(m.content), live)
 }
 
+/** What the harness itself last said an agent has in flight: the task ids, and when (epoch ms) it said so. */
+export type HarnessTasks = { at: number; ids: string[] }
+
+/**
+ * The tasks of `tracked` (Tether's own record: the transcript and the appended rows) that the harness still has.
+ * The record learns that a task ended only from its notification or a TaskStop answer, and the harness writes neither
+ * when it drops a task another way: a /clear kills the running commands of the agents not at work, and no
+ * notification reaches their transcripts (tether #30: TaskStop answered "No task found" for such a task for good).
+ * The harness's word wins when it is not older than the agent's last request: its SubagentStop lists the background
+ * work the agent has in flight, and a clear leaves it none. A turn after that word may have started tasks it does not
+ * know, so then (or with no word, or no known last request) the record stands.
+ */
+export function harnessLive(tracked: string[], said: HarnessTasks | undefined, lastStepAt: number | undefined): string[] {
+  if (!said || lastStepAt === undefined || said.at < lastStepAt) return tracked
+  const has = new Set(said.ids)
+  return tracked.filter(t => has.has(t))
+}
+
+/** The task ids of a hook input's `background_tasks` (SubagentStop, Stop); undefined when it carries none (an older engine). */
+export function backgroundIds(tasks: unknown): string[] | undefined {
+  if (!Array.isArray(tasks)) return undefined
+  return tasks.flatMap(t => (t !== null && typeof t === 'object' && typeof (t as { id?: unknown }).id === 'string' ? [(t as { id: string }).id] : []))
+}
+
 /** The ids of the background tasks a whole transcript (JSONL text) started and has not seen end, oldest first. */
 export function liveTasks(text: string): string[] {
   const live = new Set<string>()

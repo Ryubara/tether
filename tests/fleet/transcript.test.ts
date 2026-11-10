@@ -1,7 +1,7 @@
 // Reading Claude Code's transcript files for agents fleet did not see start.
 import { expect, mock, test } from 'claude-code/testing'
 
-import { contentText, lastRequest, liveTasks, metaDescription, metaModel, noteAppendedRow, noteTaskEntry, projectKey, subagentsDir } from '../../src/fleet/transcript'
+import { backgroundIds, contentText, harnessLive, lastRequest, liveTasks, metaDescription, metaModel, noteAppendedRow, noteTaskEntry, projectKey, subagentsDir } from '../../src/fleet/transcript'
 
 const T0 = Date.parse('2026-10-12T20:00:00.000Z')
 
@@ -185,4 +185,25 @@ test('the model of the last request and the model an Agent call pinned are read 
   expect(metaModel('{"agentType":"implementer","model":"inherit"}')).toBeUndefined()
   expect(metaModel('{"model":" Inherit "}')).toBeUndefined()
   expect(metaModel('{"model":""}')).toBeUndefined()
+})
+
+test('harnessLive keeps only the tracked tasks the harness still has, when its word is not older than the last request', async () => {
+  // A task left from a cleared session: the clear (an empty list) after the last request ends it
+  expect(harnessLive(['bfsxcqsxl'], { at: 2000, ids: [] }, 1000)).toEqual([])
+  // The agent's last SubagentStop listed one of two
+  expect(harnessLive(['b1', 'b2'], { at: 2000, ids: ['b2', 'other'] }, 2000)).toEqual(['b2'])
+  // A request after the harness spoke may have started tasks it did not list: the record stands
+  expect(harnessLive(['b1'], { at: 1000, ids: [] }, 2000)).toEqual(['b1'])
+  // No word, or no known last request: the record stands
+  expect(harnessLive(['b1'], undefined, 2000)).toEqual(['b1'])
+  expect(harnessLive(['b1'], { at: 2000, ids: [] }, undefined)).toEqual(['b1'])
+  // The harness's list never adds a task Tether did not track
+  expect(harnessLive([], { at: 2000, ids: ['m1'] }, 1000)).toEqual([])
+})
+
+test('backgroundIds reads the ids of a hook input\'s background_tasks, and nothing from an engine that sends none', async () => {
+  expect(backgroundIds([{ id: 'b1', type: 'shell', status: 'running', description: 'x' }, { id: 'm1', type: 'monitor' }, null, { type: 'shell' }])).toEqual(['b1', 'm1'])
+  expect(backgroundIds([])).toEqual([])
+  expect(backgroundIds(undefined)).toBeUndefined()
+  expect(backgroundIds('b1')).toBeUndefined()
 })
