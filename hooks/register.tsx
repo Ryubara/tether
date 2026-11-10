@@ -11,7 +11,7 @@ import { DEFAULTS, mergeConfig, type FleetConfig } from '../src/fleet/config'
 import { coldGuard } from '../src/fleet/guard'
 import { recordStep, type Ledger } from '../src/fleet/ledger'
 import { buildRows, GUARD_MARK, summary, tokens, type AgentLike, type RateLimit, type Row } from '../src/fleet/rows'
-import { lastRequest, liveTasks, metaDescription, metaModel, noteAppendedRow, subagentsDir } from '../src/fleet/transcript'
+import { backgroundIds, harnessLive, lastRequest, liveTasks, metaDescription, metaModel, noteAppendedRow, subagentsDir, type HarnessTasks } from '../src/fleet/transcript'
 import { endRoster, FORGET_MS, isOver, KEEP_MS, lastAssistantText, LOST_TITLE, lostContext, lostLine, markTold, observe, prune, readRoster, ROSTER_PREFIX, STALE_MS, statusLine, toTell, type RosterAgent } from '../src/fleet/lost'
 import { Boxes, parseState, type WatchState } from '../src/fleet/boxes'
 import { headerCells, legend, rowCells, rowText } from '../src/fleet/cells'
@@ -408,7 +408,8 @@ async function observeRoster($: any, now: number): Promise<void> {
     id: a.id,
     status: a.status,
     label: plain() ? plainId(a.id) : (a.name ?? byName.get(a.id) ?? descriptions.get(a.id) ?? (a.description && a.description !== '(resumed)' ? a.description : undefined) ?? a.type ?? a.id),
-    tasks: [...(bgTasks.get(a.id) ?? [])].filter(t => !stoppedIds.has(t)).length,
+    // What tasksOf counts, without reading the transcript: a task the harness dropped (a /clear) is not live
+    tasks: harnessLive([...(bgTasks.get(a.id) ?? [])].filter(t => !stoppedIds.has(t)), harnessSaid(a.id), steps.get(a.id)?.at ?? ledger.get(a.id)?.lastStepAt).length,
     teammate: a.teammateId !== undefined || a.type === 'teammate',
   }))
   roster = prune(observe(roster, list, id => ledger.get(id)?.lastStepAt, now), now, KEEP_MS)
@@ -1479,6 +1480,12 @@ const bgTasks = new Map<string, Set<string>>()
 let tasksLoaded = false
 /** Task ids Tether stopped itself: not live any more, whatever the transcript still shows until its notification is written. */
 const stoppedIds = new Set<string>()
+/** What the harness last said each agent has in flight: the `background_tasks` of its SubagentStop, by agent id. */
+const harnessStops = new Map<string, HarnessTasks>()
+/** When the session was last cleared: a clear kills the running commands of the agents not at work. */
+let clearedAt: number | undefined
+/** The harness's word is kept this long; an agent stopped longer ago has no task left to judge by it. */
+const HARNESS_KEEP_MS = 2 * 24 * 60 * 60_000
 /** A transcript larger than this is not read: `$.fs.read` rejects a file over 4 MiB. */
 const FS_READ_LIMIT = 4_000_000
 /** What a transcript showed, by agent, valid while the file's mtime stands. */
@@ -1547,6 +1554,45 @@ async function loadTasks($: any): Promise<void> {
       if (Array.isArray(list)) bgTasks.set(id, new Set(list.filter((t): t is string => typeof t === 'string')))
     }
   }
+  const harness = (await $.store.get(`guards:harness:${wcfg.storeName}`)) as { clearedAt?: unknown; stops?: Record<string, { at?: unknown; ids?: unknown }> } | undefined
+  if (harness && typeof harness === 'object') {
+    if (typeof harness.clearedAt === 'number' && clearedAt === undefined) clearedAt = harness.clearedAt
+    for (const [id, said] of Object.entries(harness.stops ?? {})) {
+      if (harnessStops.has(id) || typeof said?.at !== 'number' || !Array.isArray(said.ids)) continue
+      harnessStops.set(id, { at: said.at, ids: said.ids.filter((t): t is string => typeof t === 'string') })
+    }
+  }
+}
+
+/** Keeps what the harness said (the agents' last SubagentStop lists, the last clear) in $.store, so a reload still knows it. */
+async function persistHarness($: any, now: number): Promise<void> {
+  for (const [id, said] of harnessStops) if (now - said.at > HARNESS_KEEP_MS) harnessStops.delete(id)
+  await $.store.set(`guards:harness:${wcfg.storeName}`, { ...(clearedAt !== undefined ? { clearedAt } : {}), stops: Object.fromEntries(harnessStops) })
+}
+
+/**
+ * After a clear: it kills the running commands of the agents not at work, and no notification reaches their
+ * transcripts (tether #30), so what Tether tracked for a stopped agent before it is not live after it.
+ */
+async function tasksAfterClear($: any): Promise<void> {
+  if (halted) return
+  try {
+    await loadTasks($)
+    clearedAt = await $.clock.now()
+    await persistHarness($, clearedAt)
+  } catch {
+    // Only the clear's evidence is lost; Tether's own record stands
+  }
+}
+
+/**
+ * The harness's newest word about an agent's background work: its last SubagentStop's list, or a later clear (which
+ * leaves a stopped agent none). harnessLive uses it only when it is not older than the agent's last request.
+ */
+function harnessSaid(id: string): HarnessTasks | undefined {
+  const stop = harnessStops.get(id)
+  if (clearedAt !== undefined && (stop === undefined || clearedAt > stop.at)) return { at: clearedAt, ids: [] }
+  return stop
 }
 
 /** Keeps the live task sets in $.store, so a reload or a restart still knows them. */
@@ -1623,7 +1669,9 @@ async function tasksOf($: any, id: string, now: number): Promise<string[]> {
   } catch {
     // An unreadable transcript leaves the appended rows as the source
   }
-  return (tasks ?? [...(bgTasks.get(id) ?? [])]).filter(t => !stoppedIds.has(t))
+  const tracked = (tasks ?? [...(bgTasks.get(id) ?? [])]).filter(t => !stoppedIds.has(t))
+  // Checked against the harness: a task it dropped with no notification (a /clear) is not live, whatever the record says
+  return harnessLive(tracked, harnessSaid(id), steps.get(id)?.at ?? ledger.get(id)?.lastStepAt)
 }
 
 /** What the guard did, as pane flags: pinged, asked to hand over, handed over. */
@@ -2172,6 +2220,28 @@ export const register: Register = (on, opts) => {
     return r
   })
 
+  // What the harness itself has in flight for an agent: the background_tasks of its SubagentStop (measured on 2.1.322:
+  // an agent's own shells; the main loop's Stop lists only the main loop's). Tasks Tether tracks beyond it are not live.
+  // Its last message also becomes the status line of a lost agent whose transcript is too big to read.
+  on('classic.SubagentStop', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      const id = (e as any).agent_id
+      const said = (e as any).last_assistant_message
+      if (!plain() && typeof id === 'string' && roster[id] && typeof said === 'string' && said.trim() !== '') roster[id] = { ...roster[id]!, line: statusLine(said, 1000) }
+      const ids = backgroundIds((e as any).background_tasks)
+      if (!halted && typeof id === 'string' && ids !== undefined) {
+        await loadTasks($)
+        const now = await $.clock.now()
+        harnessStops.set(id, { at: now, ids })
+        await persistHarness($, now)
+      }
+    } catch {
+      // Only the harness's word is lost; Tether's own record stands
+    }
+    return r
+  }).catch(($, e, next) => next(e))
+
   // The model records an owner, a waiver or a decision with these tools.
   on('tool.call', { tool: `mcp__tether__${TOOL_PR}` }, async ($, e) => (halted ? { deny: HALT_TEXT } : prOwnerCall($, e)))
   on('tool.call', { tool: `mcp__tether__${TOOL_AGENT}` }, async ($, e) => (halted ? { deny: HALT_TEXT } : agentDecisionCall($, e)))
@@ -2242,6 +2312,7 @@ export const register: Register = (on, opts) => {
   // asked for it. Looked at before the rest, so a failing hook beneath cannot keep it from happening.
   on('session.end', async ($, e, next) => {
     if ((e as any).reason === 'clear') {
+      await tasksAfterClear($)
       // The agents the cleared conversation had at work go on; the ones it lost are told with the next prompt
       void lostAfterClear($).catch(() => undefined)
       await checkpointAfterClear($, String((e as any).sessionId))
@@ -2268,14 +2339,6 @@ export const register: Register = (on, opts) => {
       // Only the lost-agent notice is missed
     }
     return add.length === 0 ? r : { ...(r ?? {}), additionalContext: [...(r?.additionalContext ?? []), ...add] }
-  }).catch(($, e, next) => next(e))
-  // A subagent's last message at each stop: the status line of a lost agent whose transcript is too big to read.
-  on('classic.SubagentStop', async ($, e, next) => {
-    const r: any = await next(e)
-    const id = (e as any).agent_id
-    const said = (e as any).last_assistant_message
-    if (!plain() && typeof id === 'string' && roster[id] && typeof said === 'string' && said.trim() !== '') roster[id] = { ...roster[id]!, line: statusLine(said, 1000) }
-    return r
   }).catch(($, e, next) => next(e))
   // After a clear, the first prompt carries the handoff as context. A prompt the person submits passes Tether's
   // prompt.submit; Tether's own continue does not (a plugin's call runs beneath its own hooks), so the engine's
