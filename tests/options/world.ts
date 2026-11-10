@@ -48,6 +48,10 @@ export type World = {
   context: number
   /** The session's id (session.id); a clear gives the process a new one. */
   sessionId: string
+  /** The session folders the project's transcript folder lists (fs.list); default one, `s1`. */
+  dirs: string[]
+  /** A file's size and mtime by its key in `files` (fs.stat); default 1000 bytes, mtime 1. Over 4 MiB fs.read rejects it, as the engine does. */
+  stats: Record<string, { size: number; mtimeMs: number }>
 }
 
 export function world(over: Partial<World> = {}): World {
@@ -75,6 +79,8 @@ export function world(over: Partial<World> = {}): World {
     taskStop: {},
     context: 150_000,
     sessionId: 'abcdef12-0000',
+    dirs: ['s1'],
+    stats: {},
     ...over,
   }
 }
@@ -111,10 +117,14 @@ export async function start($: any, on: any, w: World) {
     w.reads.push(norm(e.path))
     const k = fileOf(w, e.path)
     if (k === undefined) throw new Error('no such file')
+    if ((w.stats[k]?.size ?? 0) > 4 * 1024 * 1024) throw new Error('file is over 4 MiB')
     return { value: w.files[k] }
   })
-  on('fs.list', () => ({ value: [{ name: 's1', kind: 'dir', size: 0 }] }))
-  on('fs.stat', () => ({ value: { kind: 'file', size: 1000, mtimeMs: 1, isLink: false } }))
+  on('fs.list', () => ({ value: w.dirs.map(name => ({ name, kind: 'dir', size: 0 })) }))
+  on('fs.stat', ($: any, e: any) => {
+    const k = fileOf(w, e.path)
+    return { value: { kind: 'file', size: 1000, mtimeMs: 1, isLink: false, ...(k !== undefined ? w.stats[k] : {}) } }
+  })
   on('fs.write', ($: any, e: any) => {
     w.writes[norm(e.path)] = e.text
     return { value: undefined }

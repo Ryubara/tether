@@ -38,7 +38,8 @@ test('configPath picks the config file, and annotate notes find an agent by its 
   await $.tool.call({ tool: 'Agent', name: 'builder', description: 'build wait', prompt: 'build it', subagent_type: 'general-purpose' } as any)
 
   await clock.advance(1_500)
-  expect(read).toEqual(['config'])
+  // Besides its own manifest (the version it logs), only the config file named by configPath is read
+  expect(read.filter(p => !p.replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json'))).toEqual(['config'])
   expect(ran).toEqual([['notes', '--json']])
   const text: any = await $.command.run({ command: 'tether-fleet', args: 'text' } as any)
   expect(text.text).toMatch(/^⏳ builder\s+waiting \(bg work\).*· queued: main 2\/3, 4m$/m)
