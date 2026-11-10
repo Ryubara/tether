@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0-alpha.36
+
+- Added: a notice of the subagents that ended without a report. Fleet records the agents it sees at work in the plugin
+  store, per session, and at the next session start (new, resumed or after a clear) tells the model once each agent
+  that stopped to wait on background work and was never woken, left the list or failed while at work, or was at work
+  when its session ended, with its last status line from its transcript. Seen 2026-11-10: after a `/clear` two
+  subagents of the coordinator had ended hours before while waiting on CI and on a test run, and Tether said nothing.
+
 ## 1.0.0-alpha.35
 
 - Fixed: a subagent's size was read from the transcript files found the first time Tether looked and never listed
